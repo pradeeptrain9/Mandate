@@ -234,6 +234,34 @@ Its `reprice` mode edits the response *after* signing instead, and that one neve
 policy rule at all: the gateway recomputes the signature and rejects the quote at the
 boundary. Two defences, two different places, and the tests pin that they stay distinct.
 
+### Running the model scenes on a free Gemini key
+
+Worth knowing before you try, because the arithmetic is unforgiving and none of it
+is this project's fault:
+
+* The free tier allows **five `generateContent` calls a minute, per model.** One
+  agent turn is one call, and a basket takes four or five turns.
+* Under load it answers `503 This model is currently experiencing high demand`,
+  intermittently — around half of requests during the hours this was built.
+* **A retry spends one of the five.** So retrying harder makes a run slower rather
+  than more likely to finish. An early version used eight attempts and turned one
+  turn into thirteen minutes.
+
+The backend therefore paces requests against a sliding minute, retries five times
+with a capped jittered backoff, and gives up on a 150-second deadline with a
+message that says what to do instead. It also pings each model in preference order
+before a scene starts and announces which one answered — capacity moves between
+models, and the default has been found saturated while three others were fine.
+
+What it will **not** do is change model mid-run. The injection scene's entire value
+is measuring whether *a named model* resisted an instruction; an answer that might
+have come from a different model than the one on screen would make that finding
+worthless.
+
+`stolen-credentials` and `duplicate` need no model and run in under a second. They
+are also the two scenes that argue hardest, so a rate-limited key costs you less
+than it sounds like.
+
 ### Repeating a scene
 
 The envelopes are rolling windows computed from the ledger, so running several scenes in
