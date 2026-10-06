@@ -157,7 +157,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     for record in ledger:
         print(
             f"{record.decision_id}  {record.evaluated_at.isoformat(timespec='seconds')}  "
-            f"{record.evaluation.outcome.value:<18} {str(record.quote.declared_total):>14}  "
+            f"{record.evaluation.outcome.value:<18} {record.quote.declared_total!s:>14}  "
             f"{record.quote.merchant_id}"
         )
     return 0

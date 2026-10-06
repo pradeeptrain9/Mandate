@@ -9,7 +9,7 @@ decision, so the tests that matter are the ones where Twilio is broken.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -156,10 +156,10 @@ async def test_the_token_is_in_the_path_and_nowhere_else(tmp_path, paypal, now):
 async def test_the_token_is_not_returned_to_the_agent(tmp_path, paypal, now):
     """The HTTP surface, not the service: `AuthorizationResult` carries the token
     because the gateway needs it to build the link."""
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from mandate.gateway.api import agent_router
-    from fastapi import FastAPI
 
     twilio = Twilio()
     gw = build(tmp_path, paypal, Approver(twilio.client(), APPROVER))
@@ -177,7 +177,7 @@ async def test_the_token_is_not_returned_to_the_agent(tmp_path, paypal, now):
                             items=[("SKU-GPU", "GPU hour", Category.COMPUTE, "180.00", 1)],
                             # This route uses the real clock, and the policy
                             # refuses a quote older than ten minutes.
-                            at=datetime.now(timezone.utc),
+                            at=datetime.now(UTC),
                         )
                     ),
                     "reason": "training run",

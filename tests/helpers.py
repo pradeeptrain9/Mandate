@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from mandate.engine.money import Money
 from mandate.engine.quote import Category, LineItem, MerchantQuote
@@ -40,7 +40,7 @@ def quote(
         currency=currency,
         line_items=line_items,
         declared_total=total_override or computed,
-        issued_at=at or datetime(2026, 10, 6, 11, 58, 0, tzinfo=timezone.utc),
+        issued_at=at or datetime(2026, 10, 6, 11, 58, 0, tzinfo=UTC),
         nonce=uuid.uuid4().hex[:12],
     )
     return built.sign(sign_with) if sign_with else built

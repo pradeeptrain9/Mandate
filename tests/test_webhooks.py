@@ -139,7 +139,12 @@ async def test_verification_is_asked_about_the_exact_bytes(gateway, paypal, now)
     order or spacing would not survive json.dumps still verifies.
     """
     result = await allowed_hold(gateway, now)
-    raw = b'{"id":"WH-RAW","event_type":"PAYMENT.AUTHORIZATION.CREATED","resource":{"custom_id":"%s","id":"AUTH-X"}}' % result.decision_id.encode()
+    # Hand-built bytes, not json.dumps: the point of this test is that verification
+    # runs over the exact bytes delivered, so the body must not be reserialised.
+    raw = (
+        b'{"id":"WH-RAW","event_type":"PAYMENT.AUTHORIZATION.CREATED",'
+        b'"resource":{"custom_id":"%s","id":"AUTH-X"}}' % result.decision_id.encode()
+    )
     await gateway.ingest_webhook(
         headers=dict(SIGNED_HEADERS), raw_body=raw, event=json.loads(raw), now=now
     )
@@ -166,7 +171,12 @@ async def test_a_delivery_without_signature_headers_is_rejected(gateway, now):
 async def test_a_retried_delivery_is_applied_once(gateway, now):
     """PayPal retries. A capture applied twice reads as two captures."""
     result = await allowed_hold(gateway, now)
-    body = event("PAYMENT.AUTHORIZATION.CREATED", event_id="WH-DUP", custom_id=result.decision_id, id="AUTH-1")
+    body = event(
+        "PAYMENT.AUTHORIZATION.CREATED",
+        event_id="WH-DUP",
+        custom_id=result.decision_id,
+        id="AUTH-1",
+    )
 
     first = await deliver(gateway, body, now=now)
     second = await deliver(gateway, body, now=now)

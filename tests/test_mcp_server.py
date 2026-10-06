@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from mandate.engine.quote import Category
 from mandate.gateway import mcp_server
 from mandate.gateway.service import Gateway
 from mandate.gateway.store import Store
 from mandate.ledger.codec import enc_quote
 from mandate.ledger.records import Ledger
-from mandate.engine.quote import Category
 from mandate.policies import demo_policy
 
 from fake_paypal import FakePayPal
 from helpers import LEDGER_KEY, MERCHANT_SECRET, quote
-
-from datetime import datetime, timezone
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def wired(tmp_path, monkeypatch):
 
 
 def fresh(**kw):
-    kw.setdefault("at", datetime.now(timezone.utc))
+    kw.setdefault("at", datetime.now(UTC))
     return enc_quote(quote(**kw))
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 
 import httpx
@@ -225,7 +226,7 @@ async def test_gemini_discovers_the_best_reachable_free_tier_model():
 
 
 def test_a_gemini_backend_needs_a_key():
-    with pytest.raises(ValueError, match="aistudio.google.com"):
+    with pytest.raises(ValueError, match=re.escape("aistudio.google.com")):
         GeminiBackend("")
 
 
@@ -257,7 +258,7 @@ class FakeClaudeClient:
         self.calls: list[dict] = []
 
         class Messages:
-            async def create(inner, **kwargs):  # noqa: N805
+            async def create(inner, **kwargs):
                 self.calls.append(kwargs)
                 return self._response
 
@@ -491,7 +492,7 @@ async def test_a_thought_signature_is_carried_back_on_the_next_turn():
         ],
         tools=[tool],
     )
-    model_turn = [c for c in sent[1]["contents"] if c["role"] == "model"][0]
+    model_turn = next(c for c in sent[1]["contents"] if c["role"] == "model")
     assert model_turn["parts"][0]["thoughtSignature"] == "sig-abc123"
 
 
@@ -511,7 +512,7 @@ async def test_a_call_without_a_signature_sends_no_empty_field():
         turns=[UserTurn(text="hi"), AssistantTurn(text="", tool_calls=(call,))],
         tools=[],
     )
-    model_turn = [c for c in sent[0]["contents"] if c["role"] == "model"][0]
+    model_turn = next(c for c in sent[0]["contents"] if c["role"] == "model")
     assert "thoughtSignature" not in model_turn["parts"][0]
 
 

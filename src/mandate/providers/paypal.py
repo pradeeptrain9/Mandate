@@ -32,8 +32,8 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Self
 from urllib.parse import quote
 
 import httpx
@@ -62,7 +62,8 @@ class PayPalError(RuntimeError):
             if isinstance(body, dict)
             else ""
         )
-        super().__init__(f"{operation} failed with {status}: {name or body}{f' ({issues})' if issues else ''}")
+        detail = f" ({issues})" if issues else ""
+        super().__init__(f"{operation} failed with {status}: {name or body}{detail}")
 
     @property
     def issues(self) -> list[str]:
@@ -103,8 +104,8 @@ def _rfc3339(value: datetime) -> str:
     wrong window.
     """
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    rendered = value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S-0000")
+        value = value.replace(tzinfo=UTC)
+    rendered = value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S-0000")
     return quote(rendered, safe="")
 
 
@@ -142,7 +143,7 @@ class PayPalClient:
         )
         self._token: str | None = None
 
-    async def __aenter__(self) -> "PayPalClient":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -506,7 +507,7 @@ def _attempt_key(operation: str, resource_id: str, *parts: object) -> str:
     rather than concatenated.
     """
     detail = "|".join(str(p) for p in parts)
-    digest = hashlib.sha256(f"{resource_id}|{detail}".encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(f"{resource_id}|{detail}".encode()).hexdigest()[:24]
     return f"mandate-{operation}-{digest}"
 
 

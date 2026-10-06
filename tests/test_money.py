@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 from mandate.engine.money import (
     CurrencyMismatch,
@@ -55,7 +56,8 @@ def test_cross_currency_arithmetic_is_a_type_error():
     with pytest.raises(CurrencyMismatch):
         Money(100, "USD") + Money(100, "EUR")
     with pytest.raises(CurrencyMismatch):
-        Money(100, "USD") > Money(100, "EUR")
+        # The comparison IS the subject; it is evaluated for the raise, not a value.
+        Money(100, "USD") > Money(100, "EUR")  # noqa: B015
 
 
 def test_empty_total_is_zero_not_a_guess():

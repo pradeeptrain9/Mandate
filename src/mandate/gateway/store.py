@@ -35,11 +35,11 @@ import hashlib
 import secrets
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterator
 
 from ..engine.money import Money
 from ..engine.policy import LedgerWindow, PriorAuthorization
@@ -99,11 +99,11 @@ CREATE TABLE IF NOT EXISTS seen_webhooks (
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.astimezone(timezone.utc).isoformat() if value else None
+    return value.astimezone(UTC).isoformat() if value else None
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -280,7 +280,12 @@ class Store:
         values.append(decision_id)
 
         with self._tx() as db:
-            db.execute(f"UPDATE holds SET {', '.join(sets)} WHERE decision_id = ?", values)
+            # S608: `sets` holds only column names already checked against `allowed`
+            # above, and every value is a bound parameter. No caller string reaches
+            # the SQL text.
+            db.execute(
+                f"UPDATE holds SET {', '.join(sets)} WHERE decision_id = ?", values  # noqa: S608 - `sets` holds only column names checked against `allowed`; values are bound
+            )
             db.execute(
                 "INSERT INTO hold_events (decision_id, at, from_state, to_state, detail) "
                 "VALUES (?,?,?,?,?)",
@@ -307,7 +312,7 @@ class Store:
         sets = ", ".join(f"{name} = ?" for name in columns)
         with self._tx() as db:
             db.execute(
-                f"UPDATE holds SET {sets}, updated_at = ? WHERE decision_id = ?",
+                f"UPDATE holds SET {sets}, updated_at = ? WHERE decision_id = ?",  # noqa: S608 - column names come from `allowed`; values are bound
                 (*columns.values(), _iso(_now()), decision_id),
             )
         return self.get(decision_id)
@@ -405,7 +410,7 @@ class Store:
         if states:
             marks = ",".join("?" * len(states))
             rows = self._query(
-                f"SELECT * FROM holds WHERE state IN ({marks}) "
+                f"SELECT * FROM holds WHERE state IN ({marks}) "  # noqa: S608 - `marks` is only `?` placeholders
                 "ORDER BY requested_at DESC LIMIT ?",
                 (*[s.value for s in states], limit),
             )

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -37,7 +37,7 @@ class FakeAuthorization:
     currency: str
     value: str
     status: str = "CREATED"
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     captured: Decimal = Decimal("0")
 
     @property
@@ -51,7 +51,7 @@ class FakePayPal:
     """Drive this from tests: `approve_buyer`, then let the gateway authorize."""
 
     def __init__(self, *, now: datetime | None = None) -> None:
-        self.now = now or datetime.now(timezone.utc)
+        self.now = now or datetime.now(UTC)
         self.orders: dict[str, FakeOrder] = {}
         self.authorizations: dict[str, FakeAuthorization] = {}
         self.captures: dict[str, dict] = {}

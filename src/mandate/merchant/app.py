@@ -16,7 +16,7 @@ from __future__ import annotations
 import html
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -164,7 +164,7 @@ def create_quote(merchant_id: str, request: QuoteRequest) -> dict:
         currency=request.currency,
         line_items=items,
         declared_total=total,
-        issued_at=datetime.now(timezone.utc),
+        issued_at=datetime.now(UTC),
         nonce=uuid.uuid4().hex[:16],
     ).sign(merchant_secret())
     return {"quote": enc_quote(quote)}

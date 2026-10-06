@@ -49,3 +49,48 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 
 asyncio_mode = "auto"
+
+# Pinned rather than left to ruff's defaults, which move between releases: a lint
+# commit nobody can reproduce is worse than no lint commit.
+[tool.ruff]
+# 110, not 88 or 100: measured against what is already here (p50 34, p95 83,
+# p99 95). A lower ceiling would reflow ~65 lines of working code for no reading
+# benefit, and this still catches the genuine outliers.
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+# BLE is selected on purpose. Every broad `except Exception` here is deliberate --
+# a progress line must not fail a run, an oracle must not stop a sweep, reporting a
+# failed SMS must not fail the decision -- and each carries a `# noqa: BLE001`
+# saying which. Leaving the rule out turned those into unused-noqa, and the autofix
+# stripped the reasons along with them.
+select = ["E", "F", "I", "UP", "B", "BLE", "DTZ", "RUF", "S", "TRY", "PYI"]
+ignore = [
+  # FastAPI's whole dependency-injection idiom is `x = Depends(...)` in a default
+  # argument. Obeying B008 here would mean rewriting every route signature to
+  # work around a rule written for mutable defaults.
+  "B008",
+  # Asserts are the point in a test suite.
+  "S101",
+  # `raise ... from exc` is already used where the cause matters; TRY003's ban on
+  # messages at the raise site would push every error string into a subclass.
+  "TRY003",
+  # The terminal output uses typographic characters on purpose -- `2×SKU-PAPER`
+  # and en dashes read better than ASCII in a demo someone watches.
+  "RUF001",
+  "RUF002",
+  "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests name what they do rather than what they return, and reach into internals
+# on purpose.
+"tests/*" = ["S105", "S106", "TRY"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mandate"]
+# pytest puts tests/ on sys.path, so these are local modules, not third-party.
+# Without this they sort above `mandate` imports, which reads as though the test
+# helpers were a dependency.
+known-local-folder = ["fake_backend", "fake_paypal", "helpers"]

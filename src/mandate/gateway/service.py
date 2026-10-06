@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..engine.money import Money
 from ..engine.policy import Evaluation, Outcome, Policy
@@ -41,7 +41,9 @@ from ..providers.paypal import Authorization, PayPalClient, PayPalError, approva
 from .approvals import Approver, Notification
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
-from .webhooks import WebhookOutcome, apply as apply_webhook, event_id_of, locate as locate_hold
+from .webhooks import WebhookOutcome, event_id_of
+from .webhooks import apply as apply_webhook
+from .webhooks import locate as locate_hold
 
 #: How far back to look when building the engine's window. Must exceed the
 #: longest envelope in any policy, or an envelope would silently stop seeing its
@@ -126,7 +128,7 @@ class Gateway:
         # pressing a second button for no reason. Off is for anyone who wants the
         # authorize step held back for review.
         auto_place: bool = True,
-        approver: "Approver | None" = None,
+        approver: Approver | None = None,
     ) -> None:
         self.store = store
         self.ledger = ledger
@@ -147,7 +149,7 @@ class Gateway:
     async def request_authorization(
         self, request: AuthorizationRequest, *, now: datetime | None = None
     ) -> AuthorizationResult:
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         quote = request.quote
 
         # 1 and 2. Authenticity and internal consistency, before any rule runs.
@@ -225,7 +227,7 @@ class Gateway:
         self, token: str, *, approver: str, now: datetime | None = None
     ) -> AuthorizationResult:
         """A human said yes. Resolves the SMS token and proceeds to PayPal."""
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         hold = self.store.consume_approval_token(token, at=moment)
         if hold is None:
             raise GatewayError("approval link is unknown, already used, or expired")
@@ -235,7 +237,7 @@ class Gateway:
     def decline(self, token: str, *, approver: str, now: datetime | None = None) -> Hold:
         """A human said no. Nothing was ever created at PayPal, so there is
         nothing to void -- the refusal is the whole action."""
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         hold = self.store.consume_approval_token(token, at=moment)
         if hold is None:
             raise GatewayError("approval link is unknown, already used, or expired")
@@ -301,7 +303,7 @@ class Gateway:
 
     async def place_hold(self, decision_id: str, *, now: datetime | None = None) -> Hold:
         """Authorize the approved order: funds reserved, not taken."""
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         hold = self.store.get(decision_id)
         if hold.state is not HoldState.AWAITING_BUYER:
             raise GatewayError(f"{decision_id} is {hold.state.value}, not awaiting the buyer")
@@ -332,7 +334,7 @@ class Gateway:
         now: datetime | None = None,
     ) -> Hold:
         """Take the money. Only ever called by the delivery oracle or a human."""
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         hold = self.store.get(decision_id)
         if hold.state is not HoldState.HELD:
             raise GatewayError(f"{decision_id} is {hold.state.value}, not held")
@@ -366,7 +368,7 @@ class Gateway:
         self, decision_id: str, *, reason: str, now: datetime | None = None
     ) -> Hold:
         """Release the hold. Cheaper than a refund and leaves nothing to reverse."""
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         hold = self.store.get(decision_id)
         if hold.state is not HoldState.HELD:
             raise GatewayError(f"{decision_id} is {hold.state.value}, not held")
@@ -413,7 +415,7 @@ class Gateway:
         before knowing the delivery is authentic would let anyone who can guess an
         id make the real delivery look like a replay.
         """
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         if self.paypal is None or not self.webhook_id:
             raise GatewayError(
                 "this gateway cannot verify webhooks: PAYPAL_WEBHOOK_ID and PayPal "
@@ -512,7 +514,7 @@ class Gateway:
         """What the agent has left, per envelope. Safe for an agent to read: it
         reports the policy's own figures and reveals nothing an attacker could
         not infer by trying."""
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         window = self.store.ledger_window(since=moment - self._window_span())
         out = []
         for envelope in self.policy.envelopes:
@@ -583,7 +585,7 @@ class Gateway:
 
         Like a resend, it replaces the previous token rather than adding to it.
         """
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         hold = self.store.get(decision_id)
         if hold.state is not HoldState.AWAITING_HUMAN:
             raise GatewayError(f"{decision_id} is {hold.state.value}, not awaiting a human")
@@ -601,7 +603,7 @@ class Gateway:
         means the first message went somewhere it should not have, and leaving two
         live links for one purchase would be the wrong way to fix that.
         """
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         hold = self.store.get(decision_id)
         if hold.state is not HoldState.AWAITING_HUMAN:
             raise GatewayError(

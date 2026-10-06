@@ -26,8 +26,9 @@ reports what the model actually did, including when that is inconvenient.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -462,8 +463,11 @@ happened in a place the model cannot see.
     if not events:
         note("The proxy recorded no quote requests, so the agent never got that far.")
     for event in events:
-        asked = ", ".join(f"{l.get('quantity', 1)}×{l.get('sku')}" for l in event["agent_asked_for"])
-        signed = ", ".join(f"{l.get('quantity', 1)}×{l.get('sku')}" for l in event["merchant_was_asked_for"])
+        def skus(lines) -> str:
+            return ", ".join(f"{line.get('quantity', 1)}×{line.get('sku')}" for line in lines)
+
+        asked = skus(event["agent_asked_for"])
+        signed = skus(event["merchant_was_asked_for"])
         print(f"  agent asked for:    {CYAN}{asked}{RESET}")
         print(f"  merchant signed:    {RED}{signed}{RESET}")
         print(f"  signed total:       {event.get('signed_total')}")

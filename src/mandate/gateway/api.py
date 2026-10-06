@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -341,7 +341,10 @@ async def paypal_webhook(request: Request, gw: Gateway = Depends(gateway)) -> di
     try:
         event = json.loads(raw)
         if not isinstance(event, dict):
-            raise ValueError("the body is not a JSON object")
+            # ValueError, inside the try, on purpose: a malformed body and a
+            # well-formed non-object are the same 400 and take one path. TRY004's
+            # TypeError and TRY301's inner function would both split it in two.
+            raise ValueError("the body is not a JSON object")  # noqa: TRY004, TRY301
     except ValueError as exc:
         # Unverifiable by construction, so this is a 400 and not a 503.
         raise HTTPException(400, f"not a webhook event: {exc}") from exc
@@ -679,7 +682,7 @@ def _peek(gw: Gateway, token: str) -> Hold:
     if row is None:
         raise HTTPException(404, "this approval link is not valid")
     expires = row["approval_token_expires_at"]
-    if not expires or datetime.fromisoformat(expires) < datetime.now(timezone.utc):
+    if not expires or datetime.fromisoformat(expires) < datetime.now(UTC):
         raise HTTPException(410, "this approval link has expired")
     return gw.store.get(row["decision_id"])
 

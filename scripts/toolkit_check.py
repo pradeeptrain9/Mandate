@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from mandate.providers.toolkit import (  # noqa: E402
+from mandate.providers.toolkit import (
     BROKEN_IN_TOOLKIT,
     DELIVERY_METHODS,
     DISPUTE_METHODS,

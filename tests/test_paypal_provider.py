@@ -9,6 +9,7 @@ and a forged tracking event would make it capture one.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 import httpx
 import pytest
@@ -376,12 +377,12 @@ async def test_transaction_search_sends_an_offset_qualified_timestamp():
         seen["query"] = str(request.url.query, "ascii")
         return ok({"transaction_details": []})
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     async with client(handler) as pp:
         await pp.search_transactions(
-            start=datetime(2026, 9, 5, 8, 49, 4, tzinfo=timezone.utc),
-            end=datetime(2026, 10, 6, 8, 49, 4, tzinfo=timezone.utc),
+            start=datetime(2026, 9, 5, 8, 49, 4, tzinfo=UTC),
+            end=datetime(2026, 10, 6, 8, 49, 4, tzinfo=UTC),
         )
     # The exact shape the toolkit failed to send: an explicit offset on both ends.
     assert "start_date=2026-09-05T08%3A49%3A04-0000" in seen["query"]
@@ -412,10 +413,10 @@ async def test_transaction_search_normalises_a_non_utc_offset():
 
 
 def test_a_naive_datetime_is_read_as_utc_rather_than_guessed():
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from mandate.providers.paypal import _rfc3339
 
-    naive = datetime(2026, 9, 5, 8, 49, 4)
-    aware = datetime(2026, 9, 5, 8, 49, 4, tzinfo=timezone.utc)
+    naive = datetime(2026, 9, 5, 8, 49, 4)  # noqa: DTZ001 - naive is the subject
+    aware = datetime(2026, 9, 5, 8, 49, 4, tzinfo=UTC)
     assert _rfc3339(naive) == _rfc3339(aware)

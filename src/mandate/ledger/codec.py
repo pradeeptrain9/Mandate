@@ -17,7 +17,7 @@ dict insertion order or Python version.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..engine.money import Money
@@ -54,7 +54,7 @@ def dec_money(raw: dict[str, Any]) -> Money:
 def enc_dt(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("refusing to serialise a naive datetime; a record without a zone is a guess")
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def dec_dt(raw: str) -> datetime:

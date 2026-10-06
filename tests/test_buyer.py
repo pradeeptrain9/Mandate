@@ -18,8 +18,8 @@ from mandate.gateway.api import create_app as create_gateway_app
 from mandate.gateway.service import Gateway
 from mandate.gateway.store import Store
 from mandate.ledger.records import Ledger
-from mandate.merchant.catalog import INJECTION_PAYLOAD
 from mandate.merchant.app import create_app as create_merchant_app
+from mandate.merchant.catalog import INJECTION_PAYLOAD
 from mandate.policies import demo_policy
 
 from fake_backend import FakeBackend, Step, quote_from

@@ -71,7 +71,7 @@ class Money:
     # -- construction ----------------------------------------------------
 
     @classmethod
-    def from_paypal(cls, value: str, currency: str) -> "Money":
+    def from_paypal(cls, value: str, currency: str) -> Money:
         """Parse a PayPal decimal string. Rejects anything finer than the currency allows."""
         exponent = _exponent(currency)
         try:
@@ -85,7 +85,7 @@ class Money:
         return cls(int(amount.scaleb(exponent)), currency)
 
     @classmethod
-    def zero(cls, currency: str) -> "Money":
+    def zero(cls, currency: str) -> Money:
         return cls(0, currency)
 
     # -- rendering -------------------------------------------------------
@@ -100,19 +100,19 @@ class Money:
 
     # -- arithmetic ------------------------------------------------------
 
-    def _same(self, other: "Money") -> None:
+    def _same(self, other: Money) -> None:
         if self.currency != other.currency:
             raise CurrencyMismatch(f"cannot combine {self.currency} and {other.currency}")
 
-    def __add__(self, other: "Money") -> "Money":
+    def __add__(self, other: Money) -> Money:
         self._same(other)
         return Money(self.minor + other.minor, self.currency)
 
-    def __sub__(self, other: "Money") -> "Money":
+    def __sub__(self, other: Money) -> Money:
         self._same(other)
         return Money(self.minor - other.minor, self.currency)
 
-    def __mul__(self, count: int) -> "Money":
+    def __mul__(self, count: int) -> Money:
         if not isinstance(count, int) or isinstance(count, bool):
             raise TypeError("Money scales by an integer quantity only")
         if count < 0:
@@ -123,19 +123,19 @@ class Money:
 
     # -- comparison ------------------------------------------------------
 
-    def __lt__(self, other: "Money") -> bool:
+    def __lt__(self, other: Money) -> bool:
         self._same(other)
         return self.minor < other.minor
 
-    def __le__(self, other: "Money") -> bool:
+    def __le__(self, other: Money) -> bool:
         self._same(other)
         return self.minor <= other.minor
 
-    def __gt__(self, other: "Money") -> bool:
+    def __gt__(self, other: Money) -> bool:
         self._same(other)
         return self.minor > other.minor
 
-    def __ge__(self, other: "Money") -> bool:
+    def __ge__(self, other: Money) -> bool:
         self._same(other)
         return self.minor >= other.minor
 

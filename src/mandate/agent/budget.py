@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ class Rate:
     cache_read_usd: float
 
     @classmethod
-    def from_input(cls, input_usd: float, output_usd: float) -> "Rate":
+    def from_input(cls, input_usd: float, output_usd: float) -> Rate:
         return cls(
             input_usd=input_usd,
             output_usd=output_usd,
@@ -105,7 +105,7 @@ class Usage:
     cache_read_input_tokens: int = 0
 
     @classmethod
-    def from_response(cls, usage: Any) -> "Usage":
+    def from_response(cls, usage: Any) -> Usage:
         """Read an SDK usage object or a plain dict, tolerating absent fields.
 
         A missing field is read as zero rather than guessed at. Under-counting
@@ -184,7 +184,7 @@ class SpendLedger:
         parsed = Usage.from_response(usage)
         usd = price(parsed, model)
         entry = {
-            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "at": datetime.now(UTC).isoformat(timespec="seconds"),
             "model": model,
             "label": label,
             "usd": round(usd, 6),

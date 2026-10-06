@@ -16,13 +16,13 @@ from .gemini import DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
 from .gemini import FREE_TIER_MODELS, GeminiBackend, GeminiUnavailable
 
 __all__ = [
+    "CLAUDE_DEFAULT_MODEL",
+    "FREE_TIER_MODELS",
+    "GEMINI_DEFAULT_MODEL",
     "Backend",
     "ClaudeBackend",
     "GeminiBackend",
     "GeminiUnavailable",
-    "FREE_TIER_MODELS",
-    "CLAUDE_DEFAULT_MODEL",
-    "GEMINI_DEFAULT_MODEL",
     "choose",
     "configured_providers",
 ]

@@ -45,11 +45,11 @@ import hashlib
 import hmac
 import json
 import uuid
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from collections.abc import Sequence
-from typing import Any, Iterator
+from typing import Any
 
 from ..engine.policy import Evaluation, LedgerWindow, Policy, evaluate
 from ..engine.quote import MerchantQuote, PolicyInput
@@ -131,7 +131,7 @@ class DecisionRecord:
             "evaluation": codec.enc_evaluation(self.evaluation),
         }
 
-    def sign(self, key: bytes) -> "DecisionRecord":
+    def sign(self, key: bytes) -> DecisionRecord:
         mac = hmac.new(key, codec.canonical_json(self.unsigned_payload()), hashlib.sha256)
         return DecisionRecord(
             **{**_fields(self), "signature": mac.hexdigest(), "key_id": key_id(key)}
@@ -179,7 +179,7 @@ class DecisionRecord:
         return codec.canonical_json(payload).decode("ascii")
 
     @classmethod
-    def from_json(cls, line: str) -> "DecisionRecord":
+    def from_json(cls, line: str) -> DecisionRecord:
         raw = json.loads(line)
         return cls(
             decision_id=raw["decision_id"],
@@ -255,7 +255,7 @@ def build(
     evaluation = evaluate(request, policy, ledger_window, evaluated_at)
     record = DecisionRecord(
         decision_id=decision_id or f"dec_{uuid.uuid4().hex[:16]}",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         evaluated_at=evaluated_at,
         quote=quote,
         request=request,

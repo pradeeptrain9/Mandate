@@ -24,8 +24,8 @@ swallowed: a progress line is not allowed to be the thing that kills a run.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .conversation import AgentTool, Completion, Conversation, ToolCall, Turn, Usage
@@ -102,14 +102,17 @@ async def run_agent(
     spend: SpendGuard | None = None,
     max_iterations: int = 12,
     label: str = "agent",
-    on_event: "Callable[[str, dict[str, Any]], None] | None" = None,
+    on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AgentRun:
     def emit(kind: str, **detail: Any) -> None:
         if on_event is None:
             return
         try:
             on_event(kind, detail)
-        except Exception:  # noqa: BLE001 - a progress line must never fail a run
+        except Exception:  # noqa: BLE001, S110 - a progress line must never fail a run
+            # Deliberately not logged: a caller whose progress callback raises is
+            # usually a caller whose logging raises too, and the run matters more
+            # than the trace of why its cosmetics broke.
             pass
 
     by_name = {tool.name: tool for tool in tools}

@@ -25,12 +25,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import httpx  # noqa: E402
+import httpx
 
-from mandate.agent.backends import choose, configured_providers  # noqa: E402
-from mandate.agent.budget import BudgetReached, SpendLedger  # noqa: E402
-from mandate.demo.scenes import SCENES, SceneContext  # noqa: E402
-from mandate.demo.show import BOLD, DIM, GREEN, RED, RESET, YELLOW, note, rule  # noqa: E402
+from mandate.agent.backends import choose, configured_providers
+from mandate.agent.budget import BudgetReached, SpendLedger
+from mandate.demo.scenes import SCENES, SceneContext
+from mandate.demo.show import BOLD, DIM, GREEN, RED, RESET, YELLOW, note, rule
 
 
 def list_scenes() -> int:
@@ -67,7 +67,9 @@ async def preflight(gateway_url: str, merchant_url: str) -> bool:
 
 
 async def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("scene", choices=sorted(SCENES), nargs="?", default="injection")
     parser.add_argument("--list", action="store_true", help="describe every scene and exit")
     parser.add_argument("--instruction", help="override the scene's instruction to the agent")

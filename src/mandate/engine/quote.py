@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import dataclass, field, fields, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from .money import CurrencyMismatch, Money, total
@@ -118,14 +118,14 @@ class MerchantQuote:
             self.merchant_id,
             self.currency,
             str(self.declared_total.minor),
-            self.issued_at.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            self.issued_at.astimezone(UTC).isoformat(timespec="seconds"),
             self.nonce,
         ]
         for item in self.line_items:
             parts += [item.sku, str(item.category), str(item.unit_price.minor), str(item.quantity)]
         return "\x1f".join(parts).encode("utf-8")
 
-    def sign(self, secret: bytes) -> "MerchantQuote":
+    def sign(self, secret: bytes) -> MerchantQuote:
         """Return a copy carrying a signature. Used by the merchant stub and tests."""
         mac = hmac.new(secret, self.signing_payload(), hashlib.sha256).hexdigest()
         return replace(self, signature=mac)
@@ -186,7 +186,7 @@ class MerchantQuote:
             parts += [item.sku, str(item.category), str(item.unit_price.minor), str(item.quantity)]
         return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:32]
 
-    def to_policy_input(self) -> "PolicyInput":
+    def to_policy_input(self) -> PolicyInput:
         subtotals: dict[Category, Money] = {}
         for item in self.line_items:
             running = subtotals.get(item.category, Money.zero(self.currency))

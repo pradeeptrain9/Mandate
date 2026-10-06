@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 import pytest
@@ -281,7 +282,7 @@ async def test_capturing_more_than_was_held_is_refused_before_calling_paypal(
 ):
     result = await ask(gateway, now)
     await place(gateway, paypal, result, now)
-    with pytest.raises(GatewayError, match="only 34.00 USD is held"):
+    with pytest.raises(GatewayError, match=re.escape("only 34.00 USD is held")):
         await gateway.capture(
             result.decision_id, amount=Money.from_paypal("100.00", "USD"), now=now
         )

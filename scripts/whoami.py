@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from mandate.engine.money import MINOR_UNITS  # noqa: E402
-from mandate.providers.paypal import SANDBOX, PayPalClient, PayPalError  # noqa: E402
+from mandate.engine.money import MINOR_UNITS
+from mandate.providers.paypal import SANDBOX, PayPalClient, PayPalError
 
 
 async def main() -> int:

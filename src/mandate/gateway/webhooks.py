@@ -36,7 +36,7 @@ contradict on the next replay.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..engine.money import Money
@@ -163,7 +163,7 @@ def apply(
     transition. Verification lives at the route because it needs a PayPal client,
     and keeping it out of here is what lets the whole table be tested without one.
     """
-    moment = at or datetime.now(timezone.utc)
+    moment = at or datetime.now(UTC)
     event_type = str(event.get("event_type") or "")
     event_id = event_id_of(event)
     resource = event.get("resource") or {}

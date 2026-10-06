@@ -389,7 +389,7 @@ class GeminiBackend:
                 # Jitter, because every client retrying a shared free tier on the
                 # same doubling schedule arrives back in lockstep and re-creates
                 # the spike it is backing off from.
-                pause *= 1.0 + random.random() * 0.3
+                pause *= 1.0 + random.random() * 0.3  # noqa: S311 - jitter, not a secret
                 if "429" in last:
                     # A spent per-minute window needs the window to pass, and
                     # four seconds does not. Google's own retryDelay is used when
@@ -488,7 +488,7 @@ class GeminiBackend:
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            if "text" in part and part["text"]:
+            if part.get("text"):
                 text_parts.append(str(part["text"]))
             call = part.get("functionCall")
             if isinstance(call, dict) and call.get("name"):

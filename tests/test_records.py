@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -134,7 +134,7 @@ def test_replay_mismatch_catches_a_rewritten_rule_trace(policy, now):
 
 def test_naive_datetimes_are_refused_rather_than_assumed_to_be_utc(policy, now):
     original = record(policy, now)
-    naive = replace(original, evaluated_at=datetime(2026, 10, 6, 12, 0, 0))
+    naive = replace(original, evaluated_at=datetime(2026, 10, 6, 12, 0, 0))  # noqa: DTZ001
     with pytest.raises(ValueError, match="naive datetime"):
         naive.to_json()
 
@@ -188,7 +188,7 @@ def test_a_record_names_the_key_that_signed_it():
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     assert record.key_id == key_id(b"key-alpha")
@@ -208,7 +208,7 @@ def test_key_id_survives_a_round_trip_through_json():
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     back = DecisionRecord.from_json(record.to_json())
@@ -228,7 +228,7 @@ def test_key_id_is_outside_the_signature_so_old_records_still_verify():
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     assert "key_id" not in record.unsigned_payload()
@@ -257,7 +257,7 @@ def test_the_wrong_key_is_reported_as_the_wrong_key():
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     with pytest.raises(WrongLedgerKey) as caught:
@@ -284,7 +284,7 @@ def test_a_forged_key_id_does_not_excuse_a_broken_signature():
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     forged = DecisionRecord(
@@ -300,7 +300,7 @@ def test_a_record_with_no_key_id_says_it_cannot_tell():
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     legacy = DecisionRecord(**{**_record_fields(record), "key_id": ""})
@@ -324,7 +324,7 @@ def test_a_retired_key_verifies_the_records_it_signed(tmp_path):
             quote=quote(),
             policy=demo_policy(),
             ledger_window=LedgerWindow(()),
-            evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+            evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
             key=b"key-alpha",
         )
     )
@@ -343,7 +343,7 @@ def test_check_reports_which_key_verified(tmp_path):
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     ledger.append(record)
@@ -355,7 +355,7 @@ def test_check_reports_which_key_verified(tmp_path):
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-beta",
     )
     assert rotated.check(fresh) == key_id(b"key-beta")
@@ -369,7 +369,7 @@ def test_a_record_cannot_nominate_a_key_into_existence(tmp_path):
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     with pytest.raises(WrongLedgerKey):
@@ -383,7 +383,7 @@ def test_appending_still_requires_the_current_key(tmp_path):
         quote=quote(),
         policy=demo_policy(),
         ledger_window=LedgerWindow(()),
-        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=UTC),
         key=b"key-alpha",
     )
     with pytest.raises(WrongLedgerKey):

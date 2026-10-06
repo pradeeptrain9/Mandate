@@ -219,7 +219,7 @@ def gateway(monkeypatch):
 async def test_retry_storm_posts_the_identical_quote_each_time(upstream, gateway):
     """A retry reuses the quote. A fresh quote per attempt would be a different
     bug with a different fix, and would not exercise duplicate_intent."""
-    quote, attempts = await retry_storm(
+    _quote, attempts = await retry_storm(
         gateway_url="http://gateway.test", merchant_url="http://upstream.test", attempts=3
     )
     assert [a.outcome for a in attempts] == ["allow", "deny", "deny"]
@@ -228,7 +228,7 @@ async def test_retry_storm_posts_the_identical_quote_each_time(upstream, gateway
 
 
 async def test_stolen_credentials_sends_a_reason_nothing_reads(upstream, gateway):
-    quote, attempt = await stolen_credentials(
+    quote, _attempt = await stolen_credentials(
         gateway_url="http://gateway.test", merchant_url="http://upstream.test"
     )
     assert [line["sku"] for line in quote["line_items"]] == ["SKU-GC100"]

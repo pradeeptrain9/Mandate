@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..delivery import Delivered, Delivery, DeliveryOracle
 from .state import HoldState
@@ -92,7 +92,7 @@ async def sweep(
     would be a second code path for moving money, and the project's claim is that
     there is one.
     """
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     report = SweepReport(at=moment)
 
     held = gateway.store.list(states=frozenset({HoldState.HELD}), limit=limit)
@@ -149,7 +149,7 @@ async def _settle(
     if delivery.status is Delivered.NEVER:
         try:
             await gateway.void(hold.decision_id, reason=delivery.detail or "never delivered", now=now)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - one failed void must not abandon the remaining holds
             return done("void_failed", str(exc))
         return done("voided")
 
@@ -168,6 +168,6 @@ async def _settle(
             ),
             now=now,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported as void_failed; the hold stays open for the next run
         return done("void_failed", str(exc))
     return done("voided_on_expiry")

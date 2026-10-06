@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,7 +52,7 @@ def authorize(client, **kw):
     quotes here are stamped with real time -- the shared helper's fixed timestamp
     would be rejected as stale or future-dated depending on the hour.
     """
-    kw.setdefault("at", datetime.now(timezone.utc))
+    kw.setdefault("at", datetime.now(UTC))
     return client.post(
         "/v1/agent/authorizations",
         json={"quote": enc_quote(quote(**kw)), "reason": "restocking", "agent_id": "ops-1"},
@@ -149,7 +149,7 @@ def test_a_malformed_quote_is_a_400_not_a_500(client):
 def test_an_unsigned_quote_is_refused_with_422(client):
     response = client.post(
         "/v1/agent/authorizations",
-        json={"quote": enc_quote(quote(sign_with=None, at=datetime.now(timezone.utc)))},
+        json={"quote": enc_quote(quote(sign_with=None, at=datetime.now(UTC)))},
     )
     assert response.status_code == 422
     assert "signature does not verify" in response.json()["detail"]

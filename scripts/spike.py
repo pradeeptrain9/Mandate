@@ -39,16 +39,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import httpx  # noqa: E402
+import httpx
 
-from mandate.engine.money import Money  # noqa: E402
-from mandate.providers.paypal import (  # noqa: E402
+from mandate.engine.money import Money
+from mandate.providers.paypal import (
     SANDBOX,
     PayPalClient,
     PayPalError,
     approval_link,
     new_request_id,
 )
+
 
 def say(step: str, detail: str = "") -> None:
     print(f"\n\033[1m{step}\033[0m{(' ' + detail) if detail else ''}", flush=True)
