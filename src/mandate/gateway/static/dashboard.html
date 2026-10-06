@@ -123,9 +123,13 @@ function showTrace(row) {
     <div class="id">${row.decision_id}</div>
     ${row.verified ? '' : `<p style="color:var(--deny);font-size:.78rem;margin:.4rem 0">
       This record does not verify: ${row.verification}<br>
-      <span style="color:var(--dim)">Either the ledger was altered, or it was signed with a
-      different MANDATE_LEDGER_KEY than the one configured now. Both look identical from
-      here, which is itself worth knowing.</span></p>`}
+      <span style="color:var(--dim)">${row.signed_by
+        ? 'It names ledger key <code>' + row.signed_by + '</code>. If that key was retired '
+          + 'rather than compromised, list it in MANDATE_LEDGER_RETIRED_KEYS and it will '
+          + 'verify again &mdash; but the key id sits outside the signature and can be '
+          + 'forged, so until then this record is unverified, not excused.'
+        : 'It names no signing key, so a rotation and an alteration cannot be told apart '
+          + 'here.'}</span></p>`}
     <p class="msg" style="color:var(--dim);font-size:.78rem">
       ${row.merchant_name} · ${(row.skus || []).join(', ')}
       ${row.authorization_id ? '<br>authorization ' + row.authorization_id : ''}

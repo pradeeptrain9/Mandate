@@ -72,9 +72,17 @@ def build_gateway() -> Gateway:
         else None
     )
     var = Path(os.environ.get("MANDATE_VAR_DIR", "var"))
+    # Rotation means adding a key, never replacing one. An append-only ledger
+    # outlives its key by definition: re-signing the past would mean rewriting it,
+    # which is the one thing the format exists to prevent.
+    retired = [
+        part.strip().encode("utf-8")
+        for part in os.environ.get("MANDATE_LEDGER_RETIRED_KEYS", "").split(",")
+        if part.strip()
+    ]
     return Gateway(
         store=Store(var / "state.db"),
-        ledger=Ledger(var / "decisions.jsonl", ledger_key.encode("utf-8")),
+        ledger=Ledger(var / "decisions.jsonl", ledger_key.encode("utf-8"), retired_keys=retired),
         policy=demo_policy(),
         merchant_secret=merchant_secret.encode("utf-8"),
         paypal=paypal,
@@ -371,7 +379,7 @@ def decisions(limit: int = 200, gw: Gateway = Depends(gateway)) -> dict:
     out = []
     for record in gw.ledger:
         try:
-            record.verify(gw.ledger.key)
+            gw.ledger.check(record)
             verified, verification = True, ""
         except SignatureInvalid as exc:
             verified, verification = False, str(exc)
@@ -379,6 +387,7 @@ def decisions(limit: int = 200, gw: Gateway = Depends(gateway)) -> dict:
             {
                 "verified": verified,
                 "verification": verification,
+                "key_id": record.key_id,
                 "decision_id": record.decision_id,
                 "evaluated_at": record.evaluated_at.isoformat(),
                 "merchant_id": record.quote.merchant_id,
@@ -417,12 +426,11 @@ def overview(limit: int = 500, gw: Gateway = Depends(gateway)) -> dict:
         # they could not. Dropping it silently would be worse again: a quietly
         # shorter table is how an unverifiable decision disappears.
         try:
-            record.verify(gw.ledger.key)
-            verified = True
-            verification = ""
+            signed_by = gw.ledger.check(record)
+            verified, verification = True, ""
         except SignatureInvalid as exc:
-            verified = False
-            verification = str(exc)
+            signed_by = record.key_id
+            verified, verification = False, str(exc)
         hold = holds.get(record.decision_id)
         trace = _trace_json(record.evaluation)
         rows.append(
@@ -443,6 +451,7 @@ def overview(limit: int = 500, gw: Gateway = Depends(gateway)) -> dict:
                 "skus": [item.sku for item in record.quote.line_items],
                 "verified": verified,
                 "verification": verification,
+                "signed_by": signed_by,
                 # Hold-side columns are null for a refused decision, because no
                 # PayPal object was ever created. Null rather than a placeholder:
                 # "—" in a money column is a value someone will eventually parse.

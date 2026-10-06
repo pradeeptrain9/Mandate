@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from .engine.policy import Outcome
-from .ledger.records import Ledger, ReplayMismatch, SignatureInvalid
+from .ledger.records import Ledger, ReplayMismatch, SignatureInvalid, WrongLedgerKey, key_id
 
 DEFAULT_LEDGER = Path("var/decisions.jsonl")
 
@@ -31,18 +31,73 @@ def _key() -> bytes:
     return key.encode("utf-8")
 
 
+def _retired_keys() -> list[bytes]:
+    raw = os.environ.get("MANDATE_LEDGER_RETIRED_KEYS", "")
+    return [part.strip().encode("utf-8") for part in raw.split(",") if part.strip()]
+
+
 def _ledger(path: Path) -> Ledger:
-    return Ledger(path, _key())
+    return Ledger(path, _key(), retired_keys=_retired_keys())
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    """Check every record, and keep going after the first failure.
+
+    It used to stop at the first. That was wrong in a way worth recording: four
+    records in this repository's own ledger had been signed with a rotated key, and
+    stopping at the first reported one problem and hid three. "How much of the
+    ledger is affected" is the first question anyone asks, and an early return
+    cannot answer it.
+    """
     ledger = _ledger(args.ledger)
-    try:
-        count = ledger.verify_all()
-    except SignatureInvalid as exc:
-        print(f"TAMPERED: {exc}", file=sys.stderr)
+    checked = 0
+    by_key: dict[str, int] = {}
+    rotated: list[str] = []
+    broken: list[str] = []
+
+    for record in ledger:
+        checked += 1
+        try:
+            signed_by = ledger.check(record)
+        except WrongLedgerKey as exc:
+            rotated.append(str(exc))
+        except SignatureInvalid as exc:
+            broken.append(str(exc))
+        else:
+            by_key[signed_by] = by_key.get(signed_by, 0) + 1
+
+    current = key_id(ledger.key)
+    for signed_by, count in sorted(by_key.items()):
+        where = "the configured key" if signed_by == current else "a retired key"
+        print(f"{count} record(s) verified under {where} ({signed_by})")
+
+    # stdout and stderr are buffered independently, so without this the summary
+    # lands above the counts it summarises.
+    sys.stdout.flush()
+
+    for message in rotated:
+        # Named apart from tampering because the remedy is different: this one is
+        # fixed by putting the old key in MANDATE_LEDGER_RETIRED_KEYS, and nothing
+        # about the records needs touching.
+        print(f"UNVERIFIED (names another key): {message}", file=sys.stderr)
+    for message in broken:
+        print(f"TAMPERED: {message}", file=sys.stderr)
+
+    if rotated or broken:
+        print(
+            f"\n{len(rotated) + len(broken)} of {checked} record(s) did not verify.",
+            file=sys.stderr,
+        )
+        if rotated:
+            print(
+                "Records naming another key verify again once that key is listed in\n"
+                "MANDATE_LEDGER_RETIRED_KEYS. Until then they are unverified, not excused:\n"
+                "the key id is written outside the signature and can be forged.",
+                file=sys.stderr,
+            )
         return 1
-    print(f"{count} record(s) verified against the ledger key")
+
+    print(f"{checked} record(s) verified")
     return 0
 
 
@@ -55,7 +110,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
             continue
         checked += 1
         try:
-            record.verify(ledger.key)
+            ledger.check(record)
             record.assert_replays()
         except (SignatureInvalid, ReplayMismatch) as exc:
             failures += 1

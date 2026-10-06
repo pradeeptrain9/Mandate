@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -15,8 +15,11 @@ from mandate.ledger.records import (
     Ledger,
     ReplayMismatch,
     SignatureInvalid,
+    WrongLedgerKey,
     build,
+    key_id,
 )
+from mandate.policies import demo_policy
 
 from helpers import LEDGER_KEY, quote, usd
 
@@ -170,3 +173,219 @@ def test_canonical_json_is_byte_stable_regardless_of_key_order(policy, now):
     payload = original.unsigned_payload()
     shuffled = dict(reversed(list(payload.items())))
     assert codec.canonical_json(payload) == codec.canonical_json(shuffled)
+
+
+# -- which key signed this --------------------------------------------------
+#
+# Added after four records in this repository's own ledger started reporting
+# TAMPERED following a key rotation -- indistinguishable, from the output, from
+# someone having edited the file. An alarm that cries wolf about a key change is an
+# alarm an operator learns to ignore.
+
+
+def test_a_record_names_the_key_that_signed_it():
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    assert record.key_id == key_id(b"key-alpha")
+    # Short, and not the key: it identifies, it does not authenticate.
+    assert len(record.key_id) == 16
+    assert "key-alpha" not in record.to_json()
+
+
+def test_key_ids_differ_per_key_and_are_stable():
+    assert key_id(b"a") != key_id(b"b")
+    assert key_id(b"a") == key_id(b"a")
+    assert key_id(b"") == ""
+
+
+def test_key_id_survives_a_round_trip_through_json():
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    back = DecisionRecord.from_json(record.to_json())
+    assert back.key_id == record.key_id
+    back.verify(b"key-alpha")
+
+
+def test_key_id_is_outside_the_signature_so_old_records_still_verify():
+    """It has to be, and the consequence is that it is forgeable.
+
+    Adding a field to the signed payload would invalidate every record ever
+    written, which for an append-only ledger means rewriting history to fix a
+    diagnostic. So key_id sits beside the signature, and the tests below pin that
+    this never makes an unverifiable record look acceptable.
+    """
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    assert "key_id" not in record.unsigned_payload()
+    # Strip it and the signature is unaffected: proof it is not covered.
+    stripped = DecisionRecord(**{**_record_fields(record), "key_id": ""})
+    stripped.verify(b"key-alpha")
+
+
+def _record_fields(record: DecisionRecord) -> dict:
+    return {
+        "decision_id": record.decision_id,
+        "created_at": record.created_at,
+        "evaluated_at": record.evaluated_at,
+        "quote": record.quote,
+        "request": record.request,
+        "policy": record.policy,
+        "ledger_window": record.ledger_window,
+        "evaluation": record.evaluation,
+        "signature": record.signature,
+        "record_version": record.record_version,
+    }
+
+
+def test_the_wrong_key_is_reported_as_the_wrong_key():
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    with pytest.raises(WrongLedgerKey) as caught:
+        record.verify(b"key-beta")
+    message = str(caught.value)
+    assert key_id(b"key-alpha") in message
+    assert key_id(b"key-beta") in message
+    # And it still says the record is unverified, because it is.
+    assert "still unverified" in message
+
+
+def test_the_wrong_key_error_is_still_a_signature_failure():
+    """A subclass on purpose. Every caller that treated an unverifiable record as a
+    problem keeps doing so without being edited, and no one can accidentally start
+    reading "signed with another key" as "fine"."""
+    assert issubclass(WrongLedgerKey, SignatureInvalid)
+
+
+def test_a_forged_key_id_does_not_excuse_a_broken_signature():
+    """key_id is unsigned, so an attacker can write anything in it -- including the
+    id of a key nobody holds, which would let a forgery describe itself as merely
+    old. It must stay an error."""
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    forged = DecisionRecord(
+        **{**_record_fields(record), "key_id": "0000000000000000", "signature": "00" * 32}
+    )
+    with pytest.raises(SignatureInvalid):
+        forged.verify(b"key-alpha")
+
+
+def test_a_record_with_no_key_id_says_it_cannot_tell():
+    """The honest answer for records written before the field existed."""
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    legacy = DecisionRecord(**{**_record_fields(record), "key_id": ""})
+    with pytest.raises(SignatureInvalid) as caught:
+        legacy.verify(b"key-beta")
+    assert "cannot be told apart" in str(caught.value)
+
+
+# -- rotation ---------------------------------------------------------------
+
+
+def test_a_retired_key_verifies_the_records_it_signed(tmp_path):
+    """Rotation adds a key, it never replaces one.
+
+    An append-only ledger outlives its key by definition: re-signing the past would
+    mean rewriting it, which is the one thing the format exists to prevent.
+    """
+    old = Ledger(tmp_path / "l.jsonl", b"key-alpha")
+    old.append(
+        build(
+            quote=quote(),
+            policy=demo_policy(),
+            ledger_window=LedgerWindow(()),
+            evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+            key=b"key-alpha",
+        )
+    )
+
+    rotated = Ledger(tmp_path / "l.jsonl", b"key-beta")
+    with pytest.raises(WrongLedgerKey):
+        rotated.verify_all()
+
+    with_history = Ledger(tmp_path / "l.jsonl", b"key-beta", retired_keys=[b"key-alpha"])
+    assert with_history.verify_all() == 1
+
+
+def test_check_reports_which_key_verified(tmp_path):
+    ledger = Ledger(tmp_path / "l.jsonl", b"key-alpha")
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    ledger.append(record)
+
+    rotated = Ledger(tmp_path / "l.jsonl", b"key-beta", retired_keys=[b"key-alpha"])
+    assert rotated.check(record) == key_id(b"key-alpha")
+
+    fresh = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-beta",
+    )
+    assert rotated.check(fresh) == key_id(b"key-beta")
+
+
+def test_a_record_cannot_nominate_a_key_into_existence(tmp_path):
+    """The fallback only tries keys this ledger was handed. A record naming a key
+    nobody configured fails, which is what stops key_id becoming load-bearing."""
+    ledger = Ledger(tmp_path / "l.jsonl", b"key-beta", retired_keys=[b"key-gamma"])
+    record = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    with pytest.raises(WrongLedgerKey):
+        ledger.check(record)
+
+
+def test_appending_still_requires_the_current_key(tmp_path):
+    """A retired key verifies history; it must not be able to write new history."""
+    ledger = Ledger(tmp_path / "l.jsonl", b"key-beta", retired_keys=[b"key-alpha"])
+    stale = build(
+        quote=quote(),
+        policy=demo_policy(),
+        ledger_window=LedgerWindow(()),
+        evaluated_at=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+        key=b"key-alpha",
+    )
+    with pytest.raises(WrongLedgerKey):
+        ledger.append(stale)
+    assert not (tmp_path / "l.jsonl").exists() or (tmp_path / "l.jsonl").read_text() == ""

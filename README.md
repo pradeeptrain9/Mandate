@@ -48,7 +48,7 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `engine/quote.py` | **Done.** HMAC-signed quotes, arithmetic and freshness checks, basket fingerprinting, and the `PolicyInput` projection that excludes prose. |
 | `engine/policy.py` | **Done.** 11 rule families, worst-wins severity, no short-circuiting so the full trace survives, inapplicable rules reported rather than skipped. |
 | `ledger/codec.py` | **Done.** Byte-stable canonical JSON; explicit encoder per type so a new field cannot silently vanish from a record. |
-| `ledger/records.py` | **Done.** HMAC-signed, append-only, and **replayable** — `assert_replays()` re-runs stored inputs through the live engine and fails on any divergence. |
+| `ledger/records.py` | **Done.** HMAC-signed, append-only, and **replayable** — `assert_replays()` re-runs stored inputs through the live engine and fails on any divergence. Each record names the key that signed it, so a rotation is distinguishable from tampering. |
 | `providers/paypal.py` | **Done, offline-tested.** authorize / capture / void / reauthorize / refund, idempotency keys, 401 refresh-and-retry, and webhook verification that splices the raw signed bytes rather than re-serialising them. |
 | `cli.py` | **Done.** `list`, `show`, `verify`, `replay`. |
 | Week 0 sandbox spike | **Run against the real sandbox. Passed on the things that matter** -- see below. |
@@ -72,7 +72,7 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/static/dashboard.html` | **Done.** AG Grid Community: the ledger, live hold states, budget burn-down, and the full rule trace for any decision. |
 | Render deploy | Week 4. |
 
-318 tests pass. None of them need credentials or a network.
+330 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -364,8 +364,38 @@ The endpoint originally called `record.verify()` and let it raise, and four reco
 with a rotated `MANDATE_LEDGER_KEY` made the whole view 500 — so the one moment an operator
 most needs the ledger was the one moment it was unavailable. Silently skipping them would be
 worse again: a quietly shorter table is exactly how an unverifiable decision disappears. They
-now appear with **DOES NOT VERIFY** in a signature column and a count in the header, with the
-honest caveat that a rotated key and a tampered ledger look identical from there.
+now appear with **DOES NOT VERIFY** in a signature column and a count in the header.
+
+### Which key signed this
+
+Those four records are also why each record now names its signing key.
+
+`TAMPERED` meant two completely different things — someone edited the ledger, or a key was
+rotated months ago — and an alarm that cries wolf about a key change is an alarm an operator
+learns to ignore. So every record carries `key_id`: a short, domain-separated, truncated
+digest of the key that signed it. It identifies; it does not authenticate, and it never
+contains key material.
+
+Two properties matter more than the feature:
+
+* **It is outside the signed payload**, and has to be — adding a field to the payload would
+  invalidate every record ever written, which for an append-only ledger means rewriting
+  history to fix a diagnostic. The consequence is that `key_id` is **forgeable**.
+* **So it is a routing hint, never a verdict.** It only selects which key to try.
+  `WrongLedgerKey` is a *subclass* of `SignatureInvalid` precisely so that no existing caller
+  can start reading "signed with another key" as "fine", and the fallback only tries keys the
+  ledger was actually given — a record cannot nominate a key into existence.
+
+Rotation therefore means *adding* a key, never replacing one:
+
+```bash
+MANDATE_LEDGER_KEY=<the new one>
+MANDATE_LEDGER_RETIRED_KEYS=<the old one>,<the one before that>
+```
+
+A retired key verifies history and cannot write it: `Ledger.append` still demands the current
+key. And `mandate verify` no longer stops at the first failure — stopping reported one problem
+and hid three, when "how much of the ledger is affected" is the first question anyone asks.
 
 ## How PayPal is used
 
