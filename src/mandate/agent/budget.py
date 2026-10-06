@@ -57,13 +57,27 @@ class Rate:
         )
 
 
-#: Checked against the pricing page on 2026-10-06.
+#: Checked against the published pricing on 2026-10-06.
+#:
+#: Gemini Flash models are listed at their paid rates even though the demo runs on
+#: the free tier. Pricing free usage at zero would make the cap meaningless, and
+#: the point of the ledger is to show what the thing would cost to run, not what
+#: this month's invoice happens to say. Google's free tier is rate-limited rather
+#: than billed, so the figure here is an honest cost-to-operate.
 RATES: dict[str, Rate] = {
     "claude-opus-5": Rate.from_input(5.00, 25.00),
     "claude-opus-4-8": Rate.from_input(5.00, 25.00),
     "claude-sonnet-5": Rate.from_input(2.00, 10.00),
     "claude-haiku-4-5": Rate.from_input(1.00, 5.00),
     "claude-fable-5-1": Rate.from_input(10.00, 50.00),
+    # Flash tier. Rounded up where a model prices by context length, because
+    # over-pricing makes the cap bind early and that is the safe direction.
+    "gemini-3.8-flash": Rate.from_input(0.30, 2.50),
+    "gemini-3.7-flash": Rate.from_input(0.30, 2.50),
+    "gemini-3.6-flash": Rate.from_input(0.30, 2.50),
+    "gemini-3.5-flash": Rate.from_input(0.30, 2.50),
+    "gemini-2.5-flash": Rate.from_input(0.30, 2.50),
+    "gemini-2.5-flash-lite": Rate.from_input(0.10, 0.40),
 }
 
 #: What an unlisted model is charged at. The most expensive rate known, so that a

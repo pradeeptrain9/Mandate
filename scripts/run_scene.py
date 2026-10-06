@@ -30,11 +30,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import anthropic  # noqa: E402
 import httpx  # noqa: E402
 
+from mandate.agent.backends import choose, configured_providers  # noqa: E402
 from mandate.agent.budget import BudgetReached, SpendLedger  # noqa: E402
-from mandate.agent.buyer import MODEL, BuyerAgent  # noqa: E402
+from mandate.agent.buyer import BuyerAgent  # noqa: E402
 
 SCENES: dict[str, tuple[str, str]] = {
     "ordinary": (
@@ -113,15 +113,23 @@ async def main() -> int:
     parser.add_argument("--merchant", default=os.environ.get("MANDATE_MERCHANT_URL", "http://localhost:8001"))
     parser.add_argument("--cap", type=float, default=float(os.environ.get("MANDATE_LLM_CAP_USD", "5.00")))
     parser.add_argument(
+        "--provider",
+        choices=("gemini", "claude"),
+        help="which provider drives the agent. Defaults to MANDATE_PROVIDER, else "
+        "the first configured key. The firewall behaves identically either way, "
+        "which is the point.",
+    )
+    parser.add_argument(
         "--model",
-        default=MODEL,
-        help="which model drives the agent; whether one resists an injection is a "
-        "property of the model, so it is worth measuring rather than assuming",
+        help="override the provider's default model; whether a model resists an "
+        "injection is a property of that model, so it is worth measuring",
     )
     args = parser.parse_args()
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY is not set. Source .env first.", file=sys.stderr)
+    try:
+        backend = choose(args.provider, model=args.model)
+    except RuntimeError as exc:
+        print(f"{RED}{exc}{RESET}", file=sys.stderr)
         return 2
     if not await preflight(args.gateway, args.merchant):
         return 2
@@ -133,12 +141,14 @@ async def main() -> int:
     print(f"{DIM}{expectation}{RESET}\n")
     print(f'  user → agent: "{instruction}"')
 
+    print(f"{DIM}  provider: {backend.provider} · model: {backend.model}")
+    print(f"  configured: {', '.join(configured_providers())}{RESET}")
+
     spend = SpendLedger(path=Path("var/llm_spend.jsonl"), cap_usd=args.cap)
     agent = BuyerAgent(
-        client=anthropic.AsyncAnthropic(),
+        backend=backend,
         merchant_url=args.merchant,
         gateway_url=args.gateway,
-        model=args.model,
         spend=spend,
     )
 
@@ -149,14 +159,17 @@ async def main() -> int:
         print(f"{RED}{exc}{RESET}", file=sys.stderr)
         return 1
 
-    for call in run.tool_calls:
+    for call in run.calls:
         detail = ""
         if call.name == "get_quote":
             skus = [line.get("sku") for line in call.arguments.get("lines", [])]
             detail = f"  {skus}"
         elif call.name == "browse_catalog":
             detail = f"  {call.arguments.get('merchant_id')}"
-        print(f"  → {call.name}{detail}")
+        mark = f"{RED}failed{RESET} " if call.failed else ""
+        print(f"  → {mark}{call.name}{detail}")
+    if run.stopped:
+        print(f"  {DIM}stopped: {run.stopped}{RESET}")
 
     asked = run.asked_for()
     if args.scene == "injection":
@@ -192,10 +205,9 @@ async def main() -> int:
     summary = spend.summary()
     print(
         f"  this run: ${run.usd:.4f}   session total: ${summary['spent_usd']:.4f} "
-        f"of ${summary['cap_usd']:.2f} over {summary['calls']} call(s)  [{args.model}]"
+        f"of ${summary['cap_usd']:.2f} over {summary['calls']} call(s)  "
+        f"[{backend.provider}/{backend.model}]"
     )
-    if run.stopped_early:
-        print(f"  {YELLOW}{run.stopped_early}{RESET}")
     print()
     return 0
 

@@ -59,13 +59,15 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/api.py` | **Done.** Split agent / operator surfaces, plus the human approval page. |
 | `gateway/mcp_server.py` | **Done.** Mandate as an MCP server, 7 tools, none of which can move money. |
 | `providers/toolkit.py` | **Done.** PayPal Agent Toolkit for merchant-side work, with an injectable runner and the sandbox traps documented. |
-| `agent/buyer.py` | **Done, verified live.** Claude with real tools over real HTTP. No PayPal credentials, no capture/void/approve tool. |
+| `agent/conversation.py`, `agent/loop.py` | **Done.** A provider-neutral agent loop Mandate owns, so the same firewall can be put in front of any model. |
+| `agent/backends/` | **Done.** Claude on the Messages API, Gemini over raw `generateContent`. One `Backend` protocol, one loop. |
+| `agent/buyer.py` | **Done, verified live on Claude.** Real tools over real HTTP. No PayPal credentials, no capture/void/approve tool. |
 | `agent/budget.py` | **Done.** Model spend priced from reported usage, hard cap checked before every turn. |
 | `scripts/run_scene.py` | **Done.** Runs a scene against the real gateway, real sandbox and real model. |
 | Delivery oracle, webhooks, expiry job, approval SMS | Week 3. |
 | AG Grid dashboard, Render deploy | Week 4. |
 
-182 tests pass. None of them need credentials or a network.
+242 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
