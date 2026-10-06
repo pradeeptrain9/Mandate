@@ -216,6 +216,24 @@ set -a; . ./.env; set +a
 The spike prints PayPal's own expiry figure rather than trusting the documented 29 days, and
 flags any divergence as a change to the plan.
 
+### Verified from a clean clone
+
+The hackathon rules require a judge to clone this and reach a working demo by following the
+README, so that is tested rather than assumed: clone into an empty directory, run only what
+the section above says, and check what comes out.
+
+It found the bug that exercise exists to find. `pytest` collected nothing on a clean clone —
+`asyncio_mode = "auto"` needs `pytest-asyncio`, which was not in the dev dependencies and was
+only ever installed by hand. 373 tests passed locally and zero would have run for anyone else.
+It is pinned now.
+
+The rest, on a clone with no credentials of any kind: 373 tests pass, `bootstrap_env.sh` writes
+a key, both services start, `seed_demo.py` writes 11 decisions, `mandate verify` confirms all 11
+under the configured key, `mandate replay` reports 0 divergences, and the dashboard renders the
+grid, the burn-down bars and the full rule trace for the $4,000 gift-card refusal. The envelopes
+read `0.00 of 200.00 USD committed` — correct, and the reason is the paragraph above about
+`ledger_window`.
+
 ### Looking at decisions
 
 ```bash

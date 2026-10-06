@@ -24,7 +24,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "hypothesis>=6.100"]
+# pytest-asyncio is not optional: `asyncio_mode = "auto"` below is what lets the
+# async tests run without a marker on every one of them, and without the plugin
+# `--strict-markers` turns that setting into a collection error. Found by cloning
+# this repository into an empty directory and following the README, which is the
+# only way that class of bug ever surfaces -- it passed locally for weeks because
+# the plugin was installed by hand.
+dev = ["pytest>=8.0", "pytest-asyncio>=1.0", "hypothesis>=6.100"]
 
 [project.scripts]
 mandate = "mandate.cli:main"
