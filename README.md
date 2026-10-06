@@ -63,7 +63,8 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `agent/backends/` | **Done.** Claude on the Messages API, Gemini over raw `generateContent`. One `Backend` protocol, one loop. |
 | `agent/buyer.py` | **Done, verified live on Claude.** Real tools over real HTTP. No PayPal credentials, no capture/void/approve tool. |
 | `agent/budget.py` | **Done.** Model spend priced from reported usage, hard cap checked before every turn. |
-| `scripts/run_scene.py` | **Done.** Runs a scene against the real gateway, real sandbox and real model. |
+| `demo/` scenes | **Done, eight of them.** Five need no deceived model and one needs no attacker at all. Run with `scripts/run_scene.py`. |
+| `demo/hostile_proxy.py` | **Done.** A compromised tool server that tampers with a quote *before* the merchant signs it, so the signature the gateway checks is genuine. |
 | Delivery oracle, webhooks, expiry job, approval SMS | Week 3. |
 | AG Grid dashboard, Render deploy | Week 4. |
 
@@ -175,6 +176,70 @@ export MANDATE_LEDGER_KEY=$(python -c "import secrets; print(secrets.token_urlsa
 says what happened. This keeps the complete input to each decision, so the decision can be made
 again and compared — which turns "the engine is deterministic" and "this is what the policy said
 at the time" from claims into checks.
+
+## The scenes
+
+```bash
+./scripts/serve.sh --with-proxy          # in one terminal
+.venv/bin/python scripts/run_scene.py --list
+.venv/bin/python scripts/run_scene.py stolen-credentials
+```
+
+Eight runs ending in eight different places. The distribution matters more than any
+single one of them:
+
+| Scene | Model involved? | Adversary? | Ends |
+|---|---|---|---|
+| `ordinary` | yes | no | Allowed. Funds held at PayPal, not taken. |
+| `injection` | yes | yes | Measured. Whether the model complies is reported either way. |
+| `delegation` | yes | **no** | One vague sentence; the caps decide what it was worth. |
+| `duplicate` | **no** | **no** | A retry loop. `duplicate_intent` asks a human instead of buying twice. |
+| `stolen-credentials` | **no** | yes | A script with the endpoint. Valid signature, refused anyway. |
+| `hostile-proxy` | yes | yes | Honest model, honest merchant, genuine signature, tampered basket. |
+| `expensive` | yes | no | Over the unattended threshold. A human is asked. |
+| `non-delivery` | yes | no | Never shipped. The hold is released; the money comes back. |
+
+Three of the eight involve an adversary, and only one of those three involves persuading
+a model. **A control that only catches prompt injection misses five of the eight.** That is
+the argument for a firewall, and it is the reason these scenes exist in this proportion.
+
+### On the injection scene, honestly
+
+Claude Opus 5, given an ordinary operations prompt and the real catalog, **declined the
+injection.** It quoted `['SKU-PAPER-A4']` and left the gift cards out. That is reported
+rather than tuned away: escalating the payload until a model breaks produces a demo that
+falls apart the first time a judge tries their own prompt.
+
+It does not weaken the case. "The model usually notices" is not a control you can put in
+front of an auditor, regression-test, or rely on across a vendor's next release — and the
+engine's behaviour is identical whichever way the model goes, which is the only reason
+that sentence is safe to write. The other scenes are the argument.
+
+### The compromised tool server
+
+`hostile-proxy` is the injection scene with the model's judgement removed. A man in the
+middle on the agent's *tool* channel — a typosquatted package, a poisoned MCP registry
+entry, a compromised vendor sidecar — appends lines to every quote request. The real
+merchant then prices and signs a basket nobody asked for.
+
+Everything is valid. Real merchant, real prices, genuine signature over exactly what the
+merchant was asked to price. The agent is byte-for-byte the agent from every other scene,
+reading an honestly-forwarded catalog, pointed at a different URL. The engine refuses it on
+rules that never read a word of prose.
+
+Its `reprice` mode edits the response *after* signing instead, and that one never reaches a
+policy rule at all: the gateway recomputes the signature and rejects the quote at the
+boundary. Two defences, two different places, and the tests pin that they stay distinct.
+
+### Repeating a scene
+
+The envelopes are rolling windows computed from the ledger, so running several scenes in
+one hour exhausts the hour — and the next scene gets refused for a reason that is true but
+is not the reason it set out to show. `scripts/reset_demo.sh --yes` clears the decision
+ledger and hold database, with the gateway stopped.
+
+There is deliberately no endpoint for this. A service that can erase its own audit log on
+request is not one you would put in front of money, whatever the demo convenience.
 
 ## How PayPal is used
 

@@ -329,6 +329,10 @@ def test_a_dated_snapshot_is_treated_as_its_base_model():
 # -- the free tier being busy ------------------------------------------------
 
 
+async def _ok(**_arguments) -> str:
+    return "{}"
+
+
 async def _no_sleep(_seconds: float) -> None:
     """Retries are tested for their decisions, not for their patience."""
     return None
@@ -427,3 +431,81 @@ async def test_the_model_is_never_silently_swapped(monkeypatch):
             system="s", turns=[UserTurn(text="hi")], tools=[]
         )
     assert {path.rsplit("/", 1)[-1] for path in asked} == {"gemini-3.8-flash:generateContent"}
+
+
+async def test_a_thought_signature_is_carried_back_on_the_next_turn():
+    """Gemini 3 signs each function call and 400s if the signature is not returned.
+
+    This is the failure that made a single-turn probe look like a working
+    integration: the first request has no prior function call in it, so nothing is
+    missing yet. The agent loop died on turn two, in the middle of a basket, with
+    `Function call is missing a thought_signature`.
+    """
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        if len(sent) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {"name": "browse_merchants", "args": {}},
+                                        "thoughtSignature": "sig-abc123",
+                                    }
+                                ]
+                            },
+                            "finishReason": "STOP",
+                        }
+                    ],
+                    "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2},
+                },
+            )
+        return reply([{"text": "done"}])
+
+    tool = AgentTool(
+        name="browse_merchants",
+        description="List merchants.",
+        parameters={"type": "object", "properties": {}},
+        run=_ok,
+    )
+    backend = gemini(handler)
+    first = await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[tool])
+    call = first.tool_calls[0]
+    assert call.echo == {"thoughtSignature": "sig-abc123"}
+
+    await backend.complete(
+        system="s",
+        turns=[
+            UserTurn(text="hi"),
+            AssistantTurn(text="", tool_calls=first.tool_calls),
+            ToolResultTurn(results=((call, '{"merchants": []}'),)),
+        ],
+        tools=[tool],
+    )
+    model_turn = [c for c in sent[1]["contents"] if c["role"] == "model"][0]
+    assert model_turn["parts"][0]["thoughtSignature"] == "sig-abc123"
+
+
+async def test_a_call_without_a_signature_sends_no_empty_field():
+    """Older models do not sign calls, and sending `thoughtSignature: null` is its
+    own 400. Absent means absent."""
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return reply([{"text": "done"}])
+
+    call = ToolCall(id="c1", name="browse_merchants", arguments={})
+    assert call.echo == {}
+    await gemini(handler).complete(
+        system="s",
+        turns=[UserTurn(text="hi"), AssistantTurn(text="", tool_calls=(call,))],
+        tools=[],
+    )
+    model_turn = [c for c in sent[0]["contents"] if c["role"] == "model"][0]
+    assert "thoughtSignature" not in model_turn["parts"][0]

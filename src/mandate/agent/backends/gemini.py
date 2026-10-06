@@ -133,7 +133,17 @@ def _contents(turns: list[Turn]) -> list[dict[str, Any]]:
             if turn.text:
                 parts.append({"text": turn.text})
             for call in turn.tool_calls:
-                parts.append({"functionCall": {"name": call.name, "args": call.arguments}})
+                part: dict[str, Any] = {
+                    "functionCall": {"name": call.name, "args": call.arguments}
+                }
+                # Gemini 3 signs each function call and refuses the next request
+                # unless the signature comes back with it. Dropping it is a 400 on
+                # the *second* turn, which is why a single-turn probe passed while
+                # every real agent run died in the middle of a basket.
+                signature = call.echo.get("thoughtSignature")
+                if signature:
+                    part["thoughtSignature"] = signature
+                parts.append(part)
             # A turn with no parts at all is a 400, so a silent assistant turn is
             # skipped rather than sent empty.
             if parts:
@@ -343,6 +353,12 @@ class GeminiBackend:
                         id=f"gemini-{uuid.uuid4().hex[:12]}",
                         name=str(call["name"]),
                         arguments=dict(call.get("args") or {}),
+                        # Carried, not interpreted. See ToolCall.echo.
+                        echo=(
+                            {"thoughtSignature": part["thoughtSignature"]}
+                            if part.get("thoughtSignature")
+                            else {}
+                        ),
                     )
                 )
 

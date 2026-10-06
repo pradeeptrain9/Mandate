@@ -30,11 +30,20 @@ class ToolCall:
     `id` matters on some providers and not others -- Anthropic pairs a result to a
     call by id, Gemini pairs by name and order. Carrying it always is cheaper than
     branching on who needs it.
+
+    `echo` is the one concession to a provider's wire format, and it is here rather
+    than in the backend because of where the data has to live. Gemini 3 attaches a
+    `thoughtSignature` to each function call and **rejects the next request if it
+    is not sent back** -- `400 Function call is missing a thought_signature`. So the
+    value arrives on one turn and must survive until the turn after, which means it
+    belongs on the turn, not in the adapter. Opaque on purpose: nothing outside
+    `backends/` reads it, and no code here decides what it means.
     """
 
     id: str
     name: str
     arguments: dict[str, Any]
+    echo: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
