@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -36,6 +37,7 @@ def client(tmp_path, paypal):
         merchant_secret=MERCHANT_SECRET,
         paypal=paypal.client(),
         public_url="https://mandate.test",
+        webhook_id="WH-TEST",
     )
     with TestClient(create_app(gw)) as c:
         c.gateway = gw
@@ -298,3 +300,96 @@ def test_merchant_prose_is_escaped_on_the_approval_page(client):
     page = client.get(f"/approve/{token}").text
     assert "<script>alert(1)</script>" not in page
     assert "&lt;script&gt;" in page
+
+
+# -- the webhook endpoint's status codes ------------------------------------
+#
+# A webhook response is an instruction to PayPal's retry loop, so the code is
+# part of the behaviour rather than decoration: 200 stops redelivery, 400 says
+# never retry this, 503 says please try again. Getting these the wrong way round
+# produces either an endless retry of a forgery or a silently lost genuine event.
+
+WEBHOOK_HEADERS = {
+    "paypal-auth-algo": "SHA256withRSA",
+    "paypal-cert-url": "https://api.sandbox.paypal.com/cert.pem",
+    "paypal-transmission-id": "tx-api-1",
+    "paypal-transmission-sig": "sig",
+    "paypal-transmission-time": "2026-10-06T12:00:00Z",
+}
+
+
+def deliver(client, body, *, headers=None):
+    return client.post(
+        "/v1/webhooks/paypal",
+        content=json.dumps(body).encode("utf-8"),
+        headers={**(WEBHOOK_HEADERS if headers is None else headers), "content-type": "application/json"},
+    )
+
+
+def test_an_unhandled_event_is_200_so_paypal_stops_resending(client):
+    response = deliver(
+        client,
+        {"id": "WH-1", "event_type": "CUSTOMER.DISPUTE.CREATED", "resource": {}},
+    )
+    assert response.status_code == 200
+    assert response.json()["action"] == "unhandled_event_type"
+
+
+def test_a_forged_delivery_is_400_not_503(client, paypal):
+    """400 means do not retry. A forgery does not become genuine on the third try,
+    and a 503 here would have PayPal redeliver it indefinitely."""
+    paypal.webhook_verification = "FAILURE"
+    response = deliver(
+        client, {"id": "WH-2", "event_type": "PAYMENT.CAPTURE.COMPLETED", "resource": {}}
+    )
+    assert response.status_code == 400
+
+
+def test_a_gateway_that_cannot_verify_answers_503(tmp_path, paypal):
+    """Please retry: the delivery may be fine and we are the broken side."""
+    store = Store(tmp_path / "state.db")
+    gw = Gateway(
+        store=store,
+        ledger=Ledger(tmp_path / "decisions.jsonl", LEDGER_KEY),
+        policy=demo_policy(),
+        merchant_secret=MERCHANT_SECRET,
+        paypal=paypal.client(),
+        webhook_id="",
+    )
+    try:
+        with TestClient(create_app(gw)) as c:
+            response = deliver(
+                c, {"id": "WH-3", "event_type": "PAYMENT.CAPTURE.COMPLETED", "resource": {}}
+            )
+            assert response.status_code == 503
+    finally:
+        store.close()
+
+
+def test_a_body_that_is_not_json_is_400(client):
+    response = client.post(
+        "/v1/webhooks/paypal",
+        content=b"not json at all",
+        headers={**WEBHOOK_HEADERS, "content-type": "application/json"},
+    )
+    assert response.status_code == 400
+
+
+def test_a_json_array_body_is_400(client):
+    """A list has no event_type and no id. Rejected at the shape, before anything
+    tries to read fields off it."""
+    response = deliver(client, [{"id": "WH-4"}])
+    assert response.status_code == 400
+
+
+def test_the_webhook_route_is_not_on_the_agent_surface(client):
+    """The agent must not be able to tell the gateway that money moved.
+
+    `/v1/agent/*` is the only prefix the buying agent is given, and this asserts
+    against the generated schema rather than against a list someone has to
+    remember to update.
+    """
+    paths = client.get("/openapi.json").json()["paths"]
+    agent_paths = [path for path in paths if path.startswith("/v1/agent")]
+    assert agent_paths
+    assert not any("webhook" in path for path in agent_paths)

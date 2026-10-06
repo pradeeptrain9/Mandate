@@ -20,6 +20,7 @@ absent from the interface they can reach.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,11 +35,12 @@ from ..ledger.codec import dec_quote
 from ..ledger.records import Ledger
 from ..policies import demo_policy
 from ..providers.paypal import LIVE, SANDBOX, PayPalClient
-from .service import AuthorizationRequest, Gateway, GatewayError
+from .service import AuthorizationRequest, Gateway, GatewayError, WebhookRejected
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
 
 agent_router = APIRouter(prefix="/v1/agent", tags=["agent"])
+webhook_router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
 ops_router = APIRouter(prefix="/v1/ops", tags=["operator"])
 buyer_router = APIRouter(tags=["buyer"])
 
@@ -70,6 +72,12 @@ def build_gateway() -> Gateway:
         merchant_secret=merchant_secret.encode("utf-8"),
         paypal=paypal,
         public_url=os.environ.get("MANDATE_PUBLIC_URL", "http://localhost:8000"),
+        # Absent means the webhook endpoint refuses everything. Deliberate: a
+        # gateway that cannot verify must not accept, and defaulting to "accept
+        # when unconfigured" is how an unverified path reaches production.
+        webhook_id=os.environ.get("PAYPAL_WEBHOOK_ID", ""),
+        auto_place=os.environ.get("MANDATE_AUTO_PLACE", "1").lower()
+        not in {"0", "no", "false"},
     )
 
 
@@ -244,6 +252,60 @@ async def void(decision_id: str, body: VoidBody, gw: Gateway = Depends(gateway))
         raise HTTPException(409, str(exc)) from exc
 
 
+# -- inbound from PayPal ----------------------------------------------------
+
+
+@webhook_router.post("/paypal")
+async def paypal_webhook(request: Request, gw: Gateway = Depends(gateway)) -> dict:
+    """PayPal tells us what happened. Verified before it is believed.
+
+    `await request.body()` rather than a Pydantic model, and that is not laziness.
+    Verification is over the exact bytes PayPal signed, and a parsed-then-
+    reserialised body is not guaranteed to reproduce them: key order, unicode
+    escaping and number formatting can all shift. A FastAPI model here would hand
+    the verifier a different document than the one that was signed, and the
+    endpoint would reject every genuine delivery while looking correct.
+
+    The status codes are chosen for what PayPal does with them, since a webhook
+    response is an instruction to a retry loop:
+
+      * **200** -- processed, noted, duplicated, or not understood. All four mean
+        "stop sending this", which is right even for an event we have no rule for.
+      * **400** -- the signature did not verify, or the event cannot be identified.
+        Do not retry; a forgery will not become genuine on the third attempt.
+      * **503** -- this gateway could not reach PayPal's verifier, or is not
+        configured to verify at all. Please retry: the delivery may well be fine
+        and we are the broken side.
+    """
+    raw = await request.body()
+    try:
+        event = json.loads(raw)
+        if not isinstance(event, dict):
+            raise ValueError("the body is not a JSON object")
+    except ValueError as exc:
+        # Unverifiable by construction, so this is a 400 and not a 503.
+        raise HTTPException(400, f"not a webhook event: {exc}") from exc
+
+    try:
+        outcome = await gw.ingest_webhook(
+            headers=dict(request.headers), raw_body=raw, event=event
+        )
+    except WebhookRejected as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except GatewayError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+    return {
+        "event_id": outcome.event_id,
+        "event_type": outcome.event_type,
+        "action": outcome.action,
+        "decision_id": outcome.decision_id,
+        "from_state": outcome.from_state,
+        "to_state": outcome.to_state,
+        "detail": outcome.detail,
+    }
+
+
 @ops_router.get("/decisions")
 def decisions(limit: int = 200, gw: Gateway = Depends(gateway)) -> dict:
     """The ledger, newest last, with full rule traces. Feeds the dashboard."""
@@ -414,6 +476,7 @@ def create_app(gw: Gateway | None = None) -> FastAPI:
     app.state.gateway = gw or build_gateway()
     app.include_router(agent_router)
     app.include_router(ops_router)
+    app.include_router(webhook_router)
     app.include_router(buyer_router)
 
     @app.get("/health", tags=["ops"])

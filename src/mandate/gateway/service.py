@@ -39,11 +39,21 @@ from ..ledger.records import DecisionRecord, Ledger, build
 from ..providers.paypal import Authorization, PayPalClient, PayPalError, approval_link
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
+from .webhooks import WebhookOutcome, apply as apply_webhook, event_id_of, locate as locate_hold
 
 #: How far back to look when building the engine's window. Must exceed the
 #: longest envelope in any policy, or an envelope would silently stop seeing its
 #: own history. Checked in `_window_span`.
 WINDOW_MARGIN = timedelta(days=2)
+
+
+class WebhookRejected(RuntimeError):
+    """The delivery was not authentic, or cannot be identified.
+
+    Separate from GatewayError because the right HTTP answer differs: a rejected
+    delivery must *not* be retried, while a gateway that could not reach PayPal's
+    verifier should be.
+    """
 
 
 class GatewayError(RuntimeError):
@@ -100,6 +110,14 @@ class Gateway:
         paypal: PayPalClient | None = None,
         public_url: str = "http://localhost:8000",
         approval_ttl: timedelta = timedelta(minutes=15),
+        webhook_id: str = "",
+        # Whether a buyer approving at PayPal should immediately reserve their
+        # funds. On, because that is the flow the project is about: the policy
+        # already said yes, the order already exists, and leaving the hold
+        # unplaced would mean an agent cannot complete a purchase without a human
+        # pressing a second button for no reason. Off is for anyone who wants the
+        # authorize step held back for review.
+        auto_place: bool = True,
     ) -> None:
         self.store = store
         self.ledger = ledger
@@ -108,6 +126,8 @@ class Gateway:
         self.paypal = paypal
         self.public_url = public_url.rstrip("/")
         self.approval_ttl = approval_ttl
+        self.webhook_id = webhook_id
+        self.auto_place = auto_place
 
     # -- the main path ---------------------------------------------------
 
@@ -340,6 +360,129 @@ class Gateway:
         )
 
     # -- reads -----------------------------------------------------------
+
+    # -- inbound from PayPal ---------------------------------------------
+
+    async def ingest_webhook(
+        self,
+        *,
+        headers: dict[str, str],
+        raw_body: bytes,
+        event: dict[str, object],
+        now: datetime | None = None,
+    ) -> WebhookOutcome:
+        """Verify a delivery, then let it update one hold. In that order.
+
+        The order is the whole security property, and it is worth being explicit
+        about what each step refuses:
+
+          * **No webhook id configured** -> rejected. A gateway that cannot verify
+            must not accept, and the tempting alternative -- accept when
+            unconfigured, "just for local development" -- is how an unverified path
+            reaches production.
+          * **Signature invalid** -> rejected, and recorded as rejected. This is the
+            one endpoint a stranger can post JSON to.
+          * **Event id already seen** -> acknowledged and ignored. PayPal retries,
+            and a retried capture applied twice reads as two captures.
+
+        Dedupe happens *after* verification on purpose. Remembering an event id
+        before knowing the delivery is authentic would let anyone who can guess an
+        id make the real delivery look like a replay.
+        """
+        moment = now or datetime.now(timezone.utc)
+        if self.paypal is None or not self.webhook_id:
+            raise GatewayError(
+                "this gateway cannot verify webhooks: PAYPAL_WEBHOOK_ID and PayPal "
+                "credentials are both required. Refusing to accept unverified events."
+            )
+
+        try:
+            genuine = await self.paypal.verify_webhook(
+                headers=headers, raw_body=raw_body, webhook_id=self.webhook_id
+            )
+        except PayPalError as exc:
+            # Could not reach the verifier. Not "assume genuine" and not "assume
+            # forged": a 503 from here asks PayPal to redeliver, which is correct.
+            raise GatewayError(f"could not verify this delivery with PayPal: {exc}") from exc
+
+        if not genuine:
+            raise WebhookRejected("signature verification failed")
+
+        event_id = event_id_of(event)  # type: ignore[arg-type]
+        if not event_id:
+            raise WebhookRejected("a verified event with no id cannot be deduplicated")
+        if not self.store.remember_webhook(
+            event_id, str(event.get("event_type") or ""), at=moment
+        ):
+            return WebhookOutcome(
+                event_id,
+                str(event.get("event_type") or ""),
+                "duplicate",
+                detail="already processed; PayPal retried this delivery",
+            )
+
+        if event.get("event_type") == "CHECKOUT.ORDER.APPROVED":
+            return await self._buyer_approved(event, at=moment)  # type: ignore[arg-type]
+
+        return apply_webhook(self.store, event, at=moment)  # type: ignore[arg-type]
+
+    async def _buyer_approved(
+        self, event: dict[str, object], *, at: datetime
+    ) -> WebhookOutcome:
+        """The buyer said yes at PayPal. Reserve the funds.
+
+        Handled apart from the transition table because the answer is an outbound
+        call rather than a recorded fact, and an action does not belong in a lookup
+        table. Nothing new is decided here: the policy already allowed this exact
+        basket, and the order it is authorizing is one this gateway created.
+        """
+        event_type = "CHECKOUT.ORDER.APPROVED"
+        event_id = event_id_of(event)  # type: ignore[arg-type]
+        hold = locate_hold(self.store, event)  # type: ignore[arg-type]
+        if hold is None:
+            return WebhookOutcome(
+                event_id, event_type, "no_matching_hold", detail="no hold matches this order"
+            )
+        if hold.state is not HoldState.AWAITING_BUYER:
+            return WebhookOutcome(
+                event_id,
+                event_type,
+                "already_in_state" if hold.state is HoldState.HELD else "not_awaiting_buyer",
+                decision_id=hold.decision_id,
+                from_state=hold.state.value,
+                to_state=hold.state.value,
+            )
+        if not self.auto_place:
+            return WebhookOutcome(
+                event_id,
+                event_type,
+                "noted",
+                decision_id=hold.decision_id,
+                from_state=hold.state.value,
+                to_state=hold.state.value,
+                detail="auto_place is off; an operator must place this hold",
+            )
+        try:
+            placed = await self.place_hold(hold.decision_id, now=at)
+        except (GatewayError, PayPalError) as exc:
+            return WebhookOutcome(
+                event_id,
+                event_type,
+                "place_failed",
+                decision_id=hold.decision_id,
+                from_state=hold.state.value,
+                to_state=self.store.get(hold.decision_id).state.value,
+                detail=str(exc),
+            )
+        return WebhookOutcome(
+            event_id,
+            event_type,
+            "applied",
+            decision_id=placed.decision_id,
+            from_state=HoldState.AWAITING_BUYER.value,
+            to_state=placed.state.value,
+            detail="buyer approved at PayPal; funds reserved",
+        )
 
     def budget(self, *, now: datetime | None = None) -> dict[str, object]:
         """What the agent has left, per envelope. Safe for an agent to read: it

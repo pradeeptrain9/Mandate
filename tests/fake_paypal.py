@@ -57,6 +57,13 @@ class FakePayPal:
         self.captures: dict[str, dict] = {}
         self.request_ids: list[str] = []
         self.fail_next: tuple[int, dict] | None = None
+        #: What the verifier answers. Controllable because the interesting webhook
+        #: tests are the ones where it says FAILURE, and a fake that could only
+        #: succeed would let an endpoint that never checks pass every test.
+        self.webhook_verification = "SUCCESS"
+        #: Bodies the verifier was asked about, so a test can assert the raw signed
+        #: bytes were spliced in rather than reserialised.
+        self.verified_bodies: list[bytes] = []
         self._counter = 0
 
     # -- test controls ---------------------------------------------------
@@ -115,7 +122,10 @@ class FakePayPal:
         if path.startswith("/v2/payments/authorizations/") and request.method == "GET":
             return self._get_authorization(path.rsplit("/", 1)[-1])
         if path == "/v1/notifications/verify-webhook-signature":
-            return httpx.Response(200, json={"verification_status": "SUCCESS"})
+            self.verified_bodies.append(request.content)
+            return httpx.Response(
+                200, json={"verification_status": self.webhook_verification}
+            )
 
         return httpx.Response(404, json={"name": "RESOURCE_NOT_FOUND", "path": path})
 
