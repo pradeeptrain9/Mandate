@@ -60,15 +60,15 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/mcp_server.py` | **Done.** Mandate as an MCP server, 7 tools, none of which can move money. |
 | `providers/toolkit.py` | **Done.** PayPal Agent Toolkit for merchant-side work, with an injectable runner and the sandbox traps documented. |
 | `agent/conversation.py`, `agent/loop.py` | **Done.** A provider-neutral agent loop Mandate owns, so the same firewall can be put in front of any model. |
-| `agent/backends/` | **Done.** Claude on the Messages API, Gemini over raw `generateContent`. One `Backend` protocol, one loop. |
-| `agent/buyer.py` | **Done, verified live on Claude.** Real tools over real HTTP. No PayPal credentials, no capture/void/approve tool. |
+| `agent/backends/` | **Done, both run live.** Claude on the Messages API, Gemini over raw `generateContent` — including the free tier's real constraints: thought signatures echoed across turns, five-requests-a-minute pacing, and a model chosen by probe because the listing lies. |
+| `agent/buyer.py` | **Done, verified live on Claude and Gemini.** Real tools over real HTTP. No PayPal credentials, no capture/void/approve tool. |
 | `agent/budget.py` | **Done.** Model spend priced from reported usage, hard cap checked before every turn. |
 | `demo/` scenes | **Done, eight of them.** Five need no deceived model and one needs no attacker at all. Run with `scripts/run_scene.py`. |
 | `demo/hostile_proxy.py` | **Done.** A compromised tool server that tampers with a quote *before* the merchant signs it, so the signature the gateway checks is genuine. |
 | Delivery oracle, webhooks, expiry job, approval SMS | Week 3. |
 | AG Grid dashboard, Render deploy | Week 4. |
 
-242 tests pass. None of them need credentials or a network.
+269 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
