@@ -8,7 +8,6 @@ mid-project, and the answer to that should be a flag rather than a rewrite.
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from ..loop import Backend
 from .claude import DEFAULT_MODEL as CLAUDE_DEFAULT_MODEL

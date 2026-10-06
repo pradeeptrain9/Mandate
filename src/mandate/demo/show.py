@@ -78,28 +78,6 @@ def finding(verdict: str, text: str, *, good: bool) -> None:
     print(f"\n  {colour}{BOLD}{verdict}{RESET} {text}")
 
 
-def show_calls(calls) -> None:
-    """The agent's tool trace. What it *did*, which is the only compliance
-    signal worth reading -- an agent's prose about its own behaviour is not
-    evidence of it."""
-    if not calls:
-        print(f"  {YELLOW}the agent called no tools{RESET}")
-        return
-    for call in calls:
-        detail = ""
-        if call.name == "get_quote":
-            lines = call.arguments.get("lines") or []
-            detail = "  " + ", ".join(
-                f"{line.get('quantity', 1)}×{line.get('sku')}" for line in lines
-            )
-        elif call.name == "browse_catalog":
-            detail = f"  {call.arguments.get('merchant_id')}"
-        elif call.name == "request_authorization":
-            detail = f"  {quote_total(call.arguments.get('quote') or {})}"
-        mark = f"{RED}failed{RESET} " if call.failed else ""
-        print(f"  → {mark}{call.name}{detail}")
-
-
 def show_trace(trace: list[dict]) -> None:
     for entry in trace:
         mark = {

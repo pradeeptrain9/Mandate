@@ -275,7 +275,7 @@ class Ledger:
     something you have to do visibly.
     """
 
-    def __init__(self, path: Path, key: bytes, retired_keys: "Sequence[bytes]" = ()) -> None:
+    def __init__(self, path: Path, key: bytes, retired_keys: Sequence[bytes] = ()) -> None:
         self.path = Path(path)
         self.key = key
         #: Keys that no longer sign anything but still have to verify history.

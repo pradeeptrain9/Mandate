@@ -35,8 +35,6 @@ different one behind the same firewall is part of evaluating the firewall.
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -276,12 +274,3 @@ class BuyerAgent:
             label="buyer-agent",
             on_event=on_event,
         )
-
-
-def build_spend_ledger() -> Any:
-    from .budget import SpendLedger
-
-    return SpendLedger(
-        path=Path(os.environ.get("MANDATE_VAR_DIR", "var")) / "llm_spend.jsonl",
-        cap_usd=float(os.environ.get("MANDATE_LLM_CAP_USD", "5.00")),
-    )

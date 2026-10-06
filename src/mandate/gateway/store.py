@@ -288,6 +288,30 @@ class Store:
             )
         return self.get(decision_id)
 
+    def note(self, decision_id: str, **columns: object) -> Hold:
+        """Record something about a hold without moving it.
+
+        Separate from `transition` on purpose. Every state change goes through the
+        state machine and lands in hold_events; this writes a field and does not,
+        because "the approval SMS bounced" is a fact about a hold, not a change in
+        what the hold *is*. Folding it into transition would mean inventing a
+        self-transition and filling the event history with non-events.
+        """
+        allowed = {"last_error", "approved_by"}
+        unknown = set(columns) - allowed
+        if unknown:
+            raise ValueError(f"note() will not write {sorted(unknown)}")
+        if not columns:
+            return self.get(decision_id)
+        self.get(decision_id)  # raises UnknownHold rather than silently updating nothing
+        sets = ", ".join(f"{name} = ?" for name in columns)
+        with self._tx() as db:
+            db.execute(
+                f"UPDATE holds SET {sets}, updated_at = ? WHERE decision_id = ?",
+                (*columns.values(), _iso(_now()), decision_id),
+            )
+        return self.get(decision_id)
+
     def issue_approval_token(
         self, decision_id: str, *, ttl: timedelta = timedelta(minutes=15), at: datetime | None = None
     ) -> str:

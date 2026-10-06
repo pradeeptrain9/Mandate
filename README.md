@@ -68,11 +68,11 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `delivery/` oracle | **Done.** A three-value contract — delivered, not yet, never, cannot tell — with a carrier adapter. An unreachable carrier is *cannot tell*, never *never*. |
 | `gateway/webhooks.py` | **Done.** Signature-verified over the raw signed bytes, deduplicated after verification, and structurally unable to create a hold or change an amount. |
 | `gateway/sweep.py` | **Done.** Captures on confirmed delivery, releases on non-delivery, and releases rather than captures when a lapsing hold cannot be confirmed. |
-| Approval SMS | Week 3. |
+| `gateway/approvals.py`, `providers/twilio.py` | **Done.** Over-threshold decisions page a human by SMS, and the whole approval path runs without Twilio — a trial account cannot deliver the message at all, so that fallback is the demo path. |
 | `gateway/static/dashboard.html` | **Done.** AG Grid Community: the ledger, live hold states, budget burn-down, and the full rule trace for any decision. |
 | Render deploy | Week 4. |
 
-330 tests pass. None of them need credentials or a network.
+369 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -335,6 +335,97 @@ and it is asserted absent from `/v1/agent/*` — an agent that could trigger a s
 itself. It also never consults the policy engine, because the policy decided when the order
 was created; re-deciding at capture time would let a basket be refused *after* the buyer had
 committed their funds.
+
+## Asking a human
+
+Anything over the unattended threshold parks in `awaiting_human`. **No order exists at PayPal
+and no funds are reserved** — the policy refused to spend unattended, so nothing is spent
+until a person answers. A signed, single-use, short-TTL token is minted and sent by SMS:
+
+```
+Mandate: approve 180.00 USD at Acme Supplies Ltd? https://mandate.test/approve/8qdz…
+Expires in 15 min.
+```
+
+Three choices in that message, each of which could reasonably have gone the other way.
+
+**The amount and the merchant are in the body.** The privacy-maximising version is a bare
+link, since an SMS preview lands on a lock screen. It is the wrong version: an approver who
+has to open a link to discover what they are approving is an approver being *trained to open
+links*, and training the one human in your payment path to click unexamined URLs costs more
+than a glanceable figure. With the amount in the body they can refuse a $4,000 gift-card run
+without touching anything.
+
+**The token is in the path, never in a query string, and never in the prose.** Query strings
+leak through referrer headers, proxy logs and analytics in ways path segments mostly do not.
+The store keeps only the token's SHA-256, the approval page redeems it once, and it is never
+returned to the agent — `/v1/agent/authorizations` answers `"awaiting": "a human has been
+asked to approve this"` and a bare `approver_notified` boolean. An agent that could read the
+token could approve itself, which would make the threshold decorative.
+
+**A failed send does not fail the decision.** The hold is recorded as awaiting a human
+*before* any network call. If Twilio is down the result is a correctly parked decision and a
+`last_error` on the dashboard reading what went wrong — not a 500 the agent might retry,
+because a retry would mint a second token and put two live links in the world for one
+purchase. Twilio's trial restrictions are the likely failure and they are classified rather
+than passed through, because an operator told "21608" has to go and look it up:
+
+```
+Twilio 400 (21608): unverified
+  → this is a trial account and the recipient is not verified. Add the approver's
+    number under Verified Caller IDs in the Twilio console -- you need the handset
+    to receive the code.
+```
+
+Phone numbers are redacted in every log line and every error (`+1******0123`), and **the
+message body is never logged** — it names a merchant and an amount, which is exactly what the
+approver is being asked to keep private.
+
+If the first message went somewhere it should not have, an operator can page again:
+
+```bash
+curl -X POST localhost:8000/v1/ops/holds/dec_.../resend-approval
+```
+
+That mints a new token and **invalidates the previous link**, which is the point rather than a
+side effect. Operator-only, like capture and void.
+
+**Twilio is optional, and on a trial account it is not usable at all.** With no credentials
+configured the token, the approval page and the entire human-approval path behave identically.
+An operator mints the link onto their own screen instead of waiting for a text:
+
+```bash
+curl -X POST localhost:8000/v1/ops/holds/dec_.../approval-link
+```
+
+That hands a live token to an HTTP caller, which the SMS path deliberately never does — so why
+it is acceptable here: this is the operator surface, which can already `capture` and `void`
+outright. Approving a hold is strictly less power than taking the money, so the route grants
+nothing new, and it is asserted absent from `/v1/agent/*` where the same thing would let an
+agent approve its own purchase. Making SMS mandatory would mean a judge cannot run the
+over-threshold scene without a phone number.
+
+That turned out to matter more than expected. A Twilio **trial** account cannot send a custom
+message body at all — [`Body` must be the *name* of a Twilio-provided
+template](https://www.twilio.com/docs/usage/trials/try-out-sms) (`sms_2fa`,
+`sms_account_alerts`, …) whose text Twilio chooses. There is nowhere to put a link, so the
+message above cannot be delivered on a trial, and the attempt fails with an undocumented
+`572006` whose own text — "invalid template name" — describes a mistake nobody made. The hint
+table says what is actually wrong, because the error does not.
+
+The option not taken: send `sms_account_alerts` as a content-free ping and let the approver go
+and find the dashboard. It carries no amount, no merchant and no link, and it trains the
+approver to go hunting after an unexplained buzz — the exact behaviour the first of the three
+choices above exists to prevent. Upgrading the account removes the restriction, along with the
+`Sent from your Twilio trial account` prefix that otherwise eats ~40 of a segment's 160
+characters. Running with no credentials at all is the other supported answer, and it is the one
+the demo uses.
+
+Verified end to end on that path against the real PayPal sandbox: $180 of compute parks in
+`awaiting_human` with **no order at PayPal**, the agent's response contains no token, an
+operator mints the link, the page renders `180.00` and `CloudSpend Inc`, approving creates
+order `0VK…6193P` and moves the hold to `awaiting_buyer`, and replaying the same link returns
+404.
 
 ## The dashboard
 

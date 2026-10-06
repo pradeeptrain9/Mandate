@@ -36,6 +36,7 @@ from ..ledger.codec import dec_quote
 from ..ledger.records import Ledger, SignatureInvalid
 from ..policies import demo_policy
 from ..providers.paypal import LIVE, SANDBOX, PayPalClient
+from .approvals import build_approver
 from .service import AuthorizationRequest, Gateway, GatewayError, WebhookRejected
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
@@ -93,6 +94,10 @@ def build_gateway() -> Gateway:
         webhook_id=os.environ.get("PAYPAL_WEBHOOK_ID", ""),
         auto_place=os.environ.get("MANDATE_AUTO_PLACE", "1").lower()
         not in {"0", "no", "false"},
+        # Optional on purpose. Without Twilio the approval token, page and whole
+        # human-approval path behave identically; the link is read off
+        # /v1/ops/holds instead of arriving by SMS.
+        approver=build_approver(dict(os.environ)),
     )
 
 
@@ -195,6 +200,10 @@ async def request_authorization(body: AuthorizeBody, gw: Gateway = Depends(gatew
         # The token itself is not returned to the agent. It goes out by SMS to
         # the approver; handing it back here would let the agent approve itself.
         payload["awaiting"] = "a human has been asked to approve this"
+        # A bool, not the detail. Whether the SMS left is useful to the caller;
+        # why it did not is an operator's business, and a Twilio error message can
+        # name configuration the agent has no reason to learn.
+        payload["approver_notified"] = bool(result.notification and result.notification.sent)
     return payload
 
 
@@ -237,6 +246,42 @@ async def place_hold(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
         raise HTTPException(404, f"no decision {decision_id}") from None
     except GatewayError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@ops_router.post("/holds/{decision_id}/approval-link")
+def approval_link(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
+    """Get the approval link on screen, for a deployment with no SMS provider.
+
+    POST rather than GET because it mints a token and invalidates the previous
+    one -- a GET that changed which link works would be surprising, and would be
+    fetched by anything that prefetches links.
+    """
+    try:
+        return {"approval_url": gw.issue_approval_link(decision_id)}
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@ops_router.post("/holds/{decision_id}/resend-approval")
+async def resend_approval(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
+    """Page the approver again, with a new link.
+
+    Operator-only, and it invalidates the previous link rather than adding a
+    second one. The response carries whether the message left and the redacted
+    destination -- never the token, which exists only in the SMS.
+    """
+    try:
+        hold, notice = await gw.resend_approval(decision_id)
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "hold": _hold_json(hold),
+        "notification": {"sent": notice.sent, "detail": notice.detail, "to": notice.to},
+    }
 
 
 @ops_router.post("/holds/{decision_id}/capture")
@@ -677,6 +722,11 @@ def create_app(gw: Gateway | None = None) -> FastAPI:
             "ok": True,
             "policy": app.state.gateway.policy.policy_id,
             "paypal": "configured" if app.state.gateway.paypal else "absent",
+            # Absent is a supported configuration, not a fault: the approval
+            # token and page work unchanged and the link is read off
+            # /v1/ops/holds. Reported because "did the approver get a text?" is
+            # otherwise answerable only by waiting for one not to arrive.
+            "approver_sms": "configured" if app.state.gateway.approver.configured else "absent",
         }
 
     return app

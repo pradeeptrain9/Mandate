@@ -36,10 +36,9 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 
 from ..engine.policy import Outcome
-from ..ledger.codec import dec_quote, enc_quote
+from ..ledger.codec import dec_quote
 from .api import build_gateway
 from .service import AuthorizationRequest, Gateway, GatewayError
-from .state import HoldState
 from .store import UnknownHold
 
 MERCHANT_URL = os.environ.get("MANDATE_MERCHANT_URL", "http://localhost:8001")

@@ -14,7 +14,6 @@ import pytest
 
 from mandate.agent.budget import BudgetReached, SpendLedger
 from mandate.agent.buyer import BuyerAgent, build_tools
-from mandate.engine.quote import Category
 from mandate.gateway.api import create_app as create_gateway_app
 from mandate.gateway.service import Gateway
 from mandate.gateway.store import Store

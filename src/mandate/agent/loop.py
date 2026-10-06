@@ -70,9 +70,6 @@ class AgentRun:
     def tools_used(self) -> list[str]:
         return [call.name for call in self.calls]
 
-    def results_for(self, name: str) -> list[Any]:
-        return [call.result for call in self.calls if call.name == name]
-
     def decisions(self) -> list[dict[str, Any]]:
         return [
             call.result

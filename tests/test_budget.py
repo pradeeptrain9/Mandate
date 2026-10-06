@@ -52,7 +52,9 @@ def test_usage_is_read_from_an_sdk_object_or_a_dict():
         {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 7}
     )
     assert from_object == from_dict
-    assert from_object.total_tokens == 127
+    assert (from_object.input_tokens, from_object.output_tokens) == (100, 20)
+    # A field the SDK object never mentioned, read as zero rather than guessed.
+    assert from_object.cache_creation_input_tokens == 0
 
 
 def test_absent_usage_fields_are_read_as_zero_not_guessed():

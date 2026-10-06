@@ -61,7 +61,15 @@ def authorize(client, **kw):
 
 def test_health_reports_the_policy_in_force(client):
     body = client.get("/health").json()
-    assert body == {"ok": True, "policy": "demo-ops-agent", "paypal": "configured"}
+    assert body == {
+        "ok": True,
+        "policy": "demo-ops-agent",
+        "paypal": "configured",
+        # No Twilio in the fixture. Reported rather than inferred, because a
+        # trial account cannot send the approval SMS at all and an operator
+        # should not have to discover that by waiting for a text.
+        "approver_sms": "absent",
+    }
 
 
 def test_an_allowed_request_returns_the_buyer_approval_url(client):
@@ -493,3 +501,133 @@ def test_the_overview_counts_agree_with_its_own_rows(client):
     assert counts["refused_minor"] == sum(
         r["amount_minor"] for r in rows if r["outcome"] != "allow"
     )
+
+
+# -- resending the approval SMS --------------------------------------------
+
+
+def _awaiting(client):
+    return authorize(
+        client,
+        merchant_id="m_cloudspend",
+        items=[("SKU-GPU", "GPU hour", Category.COMPUTE, "180.00", 1)],
+    ).json()
+
+
+def test_a_resend_reports_what_happened_without_returning_the_token(client):
+    body = _awaiting(client)
+    assert body["outcome"] == "hold_for_approval"
+    # No Twilio in the fixture, which is a supported configuration -- the route
+    # still answers, and says plainly that nothing was sent.
+    response = client.post(f"/v1/ops/holds/{body['decision_id']}/resend-approval")
+    assert response.status_code == 200
+    notice = response.json()["notification"]
+    assert notice["sent"] is False
+    assert "no Twilio credentials" in notice["detail"]
+    # The token lives in the SMS and nowhere else, least of all in an HTTP body.
+    assert "approve/" not in response.text
+
+
+def test_a_resend_invalidates_the_link_the_last_one_carried(client):
+    body = _awaiting(client)
+    gw = client.gateway
+    # The HTTP surface never hands the token back, so take the one the store
+    # holds for this decision and prove it works before the resend.
+    first = gw.store.issue_approval_token(body["decision_id"])
+    assert client.get(f"/approve/{first}").status_code == 200
+
+    assert client.post(
+        f"/v1/ops/holds/{body['decision_id']}/resend-approval"
+    ).status_code == 200
+
+    # A resend usually means the first message reached somewhere it should not
+    # have, so the old link dies. Checked through the approval page rather than
+    # the store, because that page is what an intercepted link gets used against.
+    assert client.get(f"/approve/{first}").status_code == 404
+
+
+def test_resending_an_unknown_decision_is_404(client):
+    assert client.post("/v1/ops/holds/dec_nope/resend-approval").status_code == 404
+
+
+def test_resending_for_a_hold_nobody_is_waiting_on_is_409(client):
+    allowed = authorize(client).json()
+    assert allowed["outcome"] == "allow"
+    response = client.post(f"/v1/ops/holds/{allowed['decision_id']}/resend-approval")
+    assert response.status_code == 409
+    assert "not awaiting a human" in response.json()["detail"]
+
+
+def test_the_resend_route_is_not_on_the_agent_surface(client):
+    body = _awaiting(client)
+    # Paging the approver again is an operator action. An agent that could do it
+    # could hammer the one human in the payment path until they stopped reading.
+    assert (
+        client.post(
+            f"/v1/agent/holds/{body['decision_id']}/resend-approval"
+        ).status_code
+        == 404
+    )
+
+
+# -- running the approval path with no SMS provider -------------------------
+
+
+def test_an_operator_can_mint_the_approval_link_on_screen(client):
+    body = _awaiting(client)
+    response = client.post(f"/v1/ops/holds/{body['decision_id']}/approval-link")
+    assert response.status_code == 200
+    link = response.json()["approval_url"]
+    assert link.startswith("https://mandate.test/approve/")
+    # And it is a link that actually works, which is the whole point of the route.
+    token = link.rsplit("/", 1)[1]
+    assert client.get(f"/approve/{token}").status_code == 200
+
+
+def test_minting_a_link_retires_the_one_before_it(client):
+    body = _awaiting(client)
+    first = client.post(f"/v1/ops/holds/{body['decision_id']}/approval-link").json()[
+        "approval_url"
+    ]
+    second = client.post(f"/v1/ops/holds/{body['decision_id']}/approval-link").json()[
+        "approval_url"
+    ]
+    assert first != second
+    assert client.get("/approve/" + first.rsplit("/", 1)[1]).status_code == 404
+    assert client.get("/approve/" + second.rsplit("/", 1)[1]).status_code == 200
+
+
+def test_an_approval_link_minted_this_way_still_moves_the_money(client, paypal):
+    """The point of the fallback: it is the same approval, not a lesser one."""
+    body = _awaiting(client)
+    link = client.post(f"/v1/ops/holds/{body['decision_id']}/approval-link").json()[
+        "approval_url"
+    ]
+    token = link.rsplit("/", 1)[1]
+    assert paypal.orders == {}  # nothing at PayPal while a human is being asked
+
+    approved = client.post(f"/approve/{token}", data={"verdict": "approve"})
+    assert approved.status_code == 200
+    hold = client.get(f"/v1/agent/authorizations/{body['decision_id']}").json()["hold"]
+    assert hold["state"] in {"awaiting_buyer", "held"}
+    assert hold["paypal_order_id"]
+
+
+def test_the_approval_link_route_is_not_on_the_agent_surface(client):
+    body = _awaiting(client)
+    # An agent that could mint its own approval link could approve its own
+    # purchase, which would make the threshold decorative.
+    assert (
+        client.post(f"/v1/agent/holds/{body['decision_id']}/approval-link").status_code == 404
+    )
+
+
+def test_you_cannot_mint_a_link_for_a_hold_nobody_is_waiting_on(client):
+    allowed = authorize(client).json()
+    assert allowed["outcome"] == "allow"
+    response = client.post(f"/v1/ops/holds/{allowed['decision_id']}/approval-link")
+    assert response.status_code == 409
+
+
+def test_minting_a_link_for_an_unknown_decision_is_404(client):
+    assert client.post("/v1/ops/holds/dec_nope/approval-link").status_code == 404

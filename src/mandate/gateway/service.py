@@ -29,6 +29,7 @@ what permitted it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -37,6 +38,7 @@ from ..engine.policy import Evaluation, Outcome, Policy
 from ..engine.quote import MerchantQuote, QuoteIntegrityError
 from ..ledger.records import DecisionRecord, Ledger, build
 from ..providers.paypal import Authorization, PayPalClient, PayPalError, approval_link
+from .approvals import Approver, Notification
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
 from .webhooks import WebhookOutcome, apply as apply_webhook, event_id_of, locate as locate_hold
@@ -45,6 +47,9 @@ from .webhooks import WebhookOutcome, apply as apply_webhook, event_id_of, locat
 #: longest envelope in any policy, or an envelope would silently stop seeing its
 #: own history. Checked in `_window_span`.
 WINDOW_MARGIN = timedelta(days=2)
+
+
+logger = logging.getLogger(__name__)
 
 
 class WebhookRejected(RuntimeError):
@@ -85,6 +90,9 @@ class AuthorizationResult:
     record: DecisionRecord
     approval_url: str | None = None
     approval_token: str | None = None
+    #: Only set for HOLD_FOR_APPROVAL, and never a reason the decision failed.
+    #: `notification.sent is False` means the hold stands and nobody was told.
+    notification: Notification | None = None
 
     @property
     def refused(self) -> bool:
@@ -118,6 +126,7 @@ class Gateway:
         # pressing a second button for no reason. Off is for anyone who wants the
         # authorize step held back for review.
         auto_place: bool = True,
+        approver: "Approver | None" = None,
     ) -> None:
         self.store = store
         self.ledger = ledger
@@ -128,6 +137,10 @@ class Gateway:
         self.approval_ttl = approval_ttl
         self.webhook_id = webhook_id
         self.auto_place = auto_place
+        #: Pages a human for over-threshold decisions. Optional throughout: without
+        #: it the approval token and page work unchanged and an operator reads the
+        #: link off /v1/ops/holds, so a judge can run the scene with no phone.
+        self.approver = approver or Approver(None, "")
 
     # -- the main path ---------------------------------------------------
 
@@ -184,6 +197,16 @@ class Gateway:
             token = self.store.issue_approval_token(
                 record.decision_id, ttl=self.approval_ttl, at=moment
             )
+            # The decision is already parked before this runs, and a failed send
+            # does not undo it. An SMS outage must not turn "ask a human" into an
+            # error the agent might retry -- a retry would mint a second token and
+            # put two live links in the world for one purchase.
+            notice = await self.page_approver(hold, token)
+            if notice.attempted and not notice.sent:
+                # page_approver wrote last_error, and the hold in hand predates
+                # that write. Returning the stale copy would show an operator a
+                # clean record of a send that failed.
+                hold = self.store.get(record.decision_id)
             return AuthorizationResult(
                 record.decision_id,
                 outcome,
@@ -192,6 +215,7 @@ class Gateway:
                 hold,
                 record,
                 approval_token=token,
+                notification=notice,
             )
 
         # 7. Allowed outright: straight to PayPal, no human in the loop.
@@ -524,6 +548,67 @@ class Gateway:
 
     def approval_link_for(self, token: str) -> str:
         return f"{self.public_url}/approve/{token}"
+
+    async def page_approver(self, hold: Hold, token: str) -> Notification:
+        """Send the approval SMS and record the outcome on the hold.
+
+        Written to the hold rather than only logged, because "the approver never
+        got a text" is a question asked hours later by someone reading the
+        dashboard, not someone tailing a log.
+        """
+        notice = await self.approver.page(
+            hold,
+            self.approval_link_for(token),
+            ttl_minutes=max(1, int(self.approval_ttl.total_seconds() // 60)),
+        )
+        if notice.attempted and not notice.sent:
+            try:
+                self.store.note(hold.decision_id, last_error=f"approval SMS: {notice.detail}")
+            except Exception:  # noqa: BLE001 - reporting must not fail the decision
+                logger.warning("could not record the SMS failure for %s", hold.decision_id)
+        return notice
+
+    def issue_approval_link(self, decision_id: str, *, now: datetime | None = None) -> str:
+        """Mint a fresh approval link and return it to the operator directly.
+
+        This is how the human-approval path works with no SMS provider configured,
+        which is a supported way to run Mandate rather than a degraded one.
+
+        It hands a live token to an HTTP caller, which the SMS path deliberately
+        does not do -- so the reason it is acceptable here and not there: this is
+        the operator surface, which can already `capture` and `void` outright.
+        Approving a hold is strictly less power than taking the money, so the
+        route grants nothing new. On `/v1/agent/*` the same thing would let an
+        agent approve its own purchase, which is why it is absent from there.
+
+        Like a resend, it replaces the previous token rather than adding to it.
+        """
+        moment = now or datetime.now(timezone.utc)
+        hold = self.store.get(decision_id)
+        if hold.state is not HoldState.AWAITING_HUMAN:
+            raise GatewayError(f"{decision_id} is {hold.state.value}, not awaiting a human")
+        return self.approval_link_for(
+            self.store.issue_approval_token(decision_id, ttl=self.approval_ttl, at=moment)
+        )
+
+    async def resend_approval(
+        self, decision_id: str, *, now: datetime | None = None
+    ) -> tuple[Hold, Notification]:
+        """Mint a fresh token and page again.
+
+        The new token replaces the old one in the store, so the previous link stops
+        working. That is the point rather than a side effect: a resend usually
+        means the first message went somewhere it should not have, and leaving two
+        live links for one purchase would be the wrong way to fix that.
+        """
+        moment = now or datetime.now(timezone.utc)
+        hold = self.store.get(decision_id)
+        if hold.state is not HoldState.AWAITING_HUMAN:
+            raise GatewayError(
+                f"{decision_id} is {hold.state.value}, not awaiting a human"
+            )
+        token = self.store.issue_approval_token(decision_id, ttl=self.approval_ttl, at=moment)
+        return hold, await self.page_approver(hold, token)
 
     def _record_for(self, decision_id: str) -> DecisionRecord:
         for record in self.ledger:

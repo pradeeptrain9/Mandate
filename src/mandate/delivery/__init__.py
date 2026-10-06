@@ -38,10 +38,6 @@ class Delivery:
     detail: str = ""
     reference: str = ""
 
-    @property
-    def confirmed(self) -> bool:
-        return self.status is Delivered.YES
-
 
 class DeliveryOracle(Protocol):
     """One method, because one question.

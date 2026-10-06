@@ -32,7 +32,6 @@ create US sandbox accounts, or run the spike in the accounts' own currency:
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import os
 import sys
@@ -42,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import httpx  # noqa: E402
 
-from mandate.engine.money import MINOR_UNITS, Money  # noqa: E402
+from mandate.engine.money import Money  # noqa: E402
 from mandate.providers.paypal import (  # noqa: E402
     SANDBOX,
     PayPalClient,

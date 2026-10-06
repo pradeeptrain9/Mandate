@@ -126,15 +126,6 @@ class Usage:
             cache_read_input_tokens=get("cache_read_input_tokens"),
         )
 
-    @property
-    def total_tokens(self) -> int:
-        return (
-            self.input_tokens
-            + self.output_tokens
-            + self.cache_creation_input_tokens
-            + self.cache_read_input_tokens
-        )
-
 
 def price(usage: Usage, model: str) -> float:
     """USD for one request. Exact arithmetic on the counts the API reported."""
