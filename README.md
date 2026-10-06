@@ -70,9 +70,11 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/sweep.py` | **Done.** Captures on confirmed delivery, releases on non-delivery, and releases rather than captures when a lapsing hold cannot be confirmed. |
 | `gateway/approvals.py`, `providers/twilio.py` | **Done.** Over-threshold decisions page a human by SMS, and the whole approval path runs without Twilio — a trial account cannot deliver the message at all, so that fallback is the demo path. |
 | `gateway/static/dashboard.html` | **Done.** AG Grid Community: the ledger, live hold states, budget burn-down, and the full rule trace for any decision. |
-| Render deploy | Week 4. |
+| `Dockerfile`, `docker-compose.yml` | **Written, build not yet verified.** Two services from one image, non-root, healthchecked, ledger on a named volume. The image has not been built end to end: the machine it was written on ran out of disk. |
+| `render.yaml` | **Done.** Blueprint for both services, with the free-tier disk caveat documented rather than hidden. |
+| `scripts/seed_demo.py` | **Done.** A month of history from nothing, produced by the real engine so every seeded record still replays. |
 
-369 tests pass. None of them need credentials or a network.
+373 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -149,8 +151,55 @@ absent, and a test asserts it stays that way.
 ## Quickstart
 
 ```bash
+./scripts/bootstrap_env.sh    # generates .env with a fresh ledger key
+docker compose up --build     # merchant on :8001, gateway on :8000
+```
+
+Then, in another shell, put a month of history in the ledger so the dashboard has something
+to show:
+
+```bash
+docker compose exec gateway python scripts/seed_demo.py
+```
+
+- the dashboard — <http://localhost:8000/v1/ops/dashboard>
+- a product page with a prompt injection in its description —
+  <http://localhost:8001/merchants/m_acme/products/SKU-PAPER-A4/page>
+
+**Two commands, not one, and the first one is not boilerplate.** This repository ships no
+default ledger key and no default merchant secret. A committed HMAC key would mean every clone
+signed its decision records with the same value, which would make "the ledger is signed" worth
+nothing — anyone could forge a record for anyone's deployment. So the gateway refuses to start
+without a key and `bootstrap_env.sh` generates one. It will not overwrite an existing `.env`.
+
+**What runs with no account anywhere:** every refusal, the human-approval path end to end, the
+dashboard, the ledger, `verify` and `replay`. **What needs credentials:** the scene where money
+actually moves (`PAYPAL_CLIENT_ID`/`_SECRET`), webhook ingestion (`PAYPAL_WEBHOOK_ID` — without
+it the endpoint refuses everything, deliberately), and approval by SMS rather than on an
+operator's screen (`TWILIO_*`). The seed script prints which of those it had.
+
+One consequence of a credential-free run is worth knowing before you decide the seed is broken:
+`Store.ledger_window` counts only holds where an order was actually created, because a refused
+or unplaced decision consumed no budget and reached for nothing. So with no PayPal credentials
+nothing seeded contributes history — the budget envelopes read zero, the velocity counter reads
+zero, and `duplicate_intent` cannot fire however many identical baskets are seeded. Those three
+rules need holds to exist. The refusals that depend on the basket alone — denied category, the
+caps, the thresholds — are complete either way, and they are what the project is about.
+
+```bash
+docker compose --profile attack up    # adds the compromised tool server on :8002
+```
+
+Off by default, because it is an attacker and a rig that starts one unasked is a rig nobody
+should copy into anything.
+
+### Without Docker
+
+```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest
+.venv/bin/python -m pytest          # 373 tests, no credentials, no network
+./scripts/bootstrap_env.sh
+./scripts/serve.sh                  # merchant and gateway, Ctrl-C stops both
 ```
 
 Then the de-risking spike against the real sandbox. Create an app at
@@ -487,6 +536,44 @@ MANDATE_LEDGER_RETIRED_KEYS=<the old one>,<the one before that>
 A retired key verifies history and cannot write it: `Ledger.append` still demands the current
 key. And `mandate verify` no longer stops at the first failure — stopping reported one problem
 and hid three, when "how much of the ledger is affected" is the first question anyone asks.
+
+## Deploying it
+
+`render.yaml` is a blueprint: two services from the one `Dockerfile`, the gateway with a
+persistent disk at `/var/lib/mandate`.
+
+```bash
+# In the Render dashboard: New → Blueprint → point it at this repository.
+```
+
+Four things in that file are decisions rather than defaults.
+
+**The merchant and the gateway are separate services.** They could share a process and the demo
+would be cheaper to host. They do not, because the merchant is an untrusted third party whose
+signed quotes the gateway checks, and a demo where the thing being refused lives inside the
+thing refusing it proves less.
+
+**The ledger key is `generateValue`, the merchant secret is shared by reference.** Render mints
+the key once and never touches it again. The merchant reads the same secret via `fromService`
+rather than carrying its own copy, because a merchant and a gateway that disagree about the
+signing key fail with "signature invalid" on every quote — which reads like an attack rather
+than a typo.
+
+**Every credential is `sync: false`.** That is Render's way of saying "this blueprint does not
+carry the value", which is the only correct way to describe a secret in a committed file. They
+are entered in the dashboard.
+
+**The disk needs a paid instance, and that is a real constraint rather than an upsell.** Render's
+free instance type has no persistent disk, so the ledger and the hold database are lost on every
+restart and every deploy. `seed_demo.py` refills them, so a demo URL survives it — but an
+append-only audit log that vanishes on deploy is the opposite of the thing this project argues
+for, and it would be dishonest to ship a blueprint that quietly did that. If you deploy on the
+free tier anyway, know that `MANDATE_LEDGER_KEY` is regenerated with the instance, so records
+from before a restart will report as signed by an unknown key — correctly, since they were.
+
+After the first deploy, set `MANDATE_PUBLIC_URL` to the gateway's own URL. It is what the
+approval link points at and where PayPal returns the buyer; leaving it wrong produces approval
+links that resolve to `localhost` on the approver's phone.
 
 ## How PayPal is used
 

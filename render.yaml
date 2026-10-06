@@ -1,0 +1,84 @@
+# Render blueprint. Two services, because the merchant is an untrusted third party
+# and the demo is less honest if it shares a process with the gateway that refuses
+# its baskets.
+#
+# Read the disk and the plan notes before deploying: on Render's free instance type
+# there is no persistent disk, so the ledger and the hold database are lost on every
+# restart and every deploy. That is survivable for a demo -- scripts/seed_demo.py
+# refills it -- but it is the opposite of what an append-only audit log is for, so
+# the disk below is attached to a paid instance and the free path is called out
+# rather than left to be discovered.
+
+services:
+  - type: web
+    name: mandate-merchant
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /merchants
+    dockerCommand: sh -c "exec uvicorn mandate.merchant.app:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      # The same value the gateway holds. `fromService` rather than two copies of
+      # a generated secret, because a merchant and a gateway that disagree about
+      # the signing key fail with "signature invalid" on every quote, which reads
+      # like an attack rather than a configuration mistake.
+      - key: MANDATE_MERCHANT_SECRET
+        fromService:
+          name: mandate-gateway
+          type: web
+          envVarKey: MANDATE_MERCHANT_SECRET
+
+  - type: web
+    name: mandate-gateway
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    disk:
+      name: ledger
+      mountPath: /var/lib/mandate
+      sizeGB: 1
+    envVars:
+      - key: MANDATE_VAR_DIR
+        value: /var/lib/mandate
+      # Generated once by Render and then never changed by it. Rotating this means
+      # moving the old value into MANDATE_LEDGER_RETIRED_KEYS, not replacing it:
+      # an append-only ledger outlives its key, and re-signing the past would mean
+      # rewriting it.
+      - key: MANDATE_LEDGER_KEY
+        generateValue: true
+      - key: MANDATE_MERCHANT_SECRET
+        generateValue: true
+      - key: MANDATE_LEDGER_RETIRED_KEYS
+        value: ""
+      - key: MANDATE_MERCHANT_URL
+        fromService:
+          name: mandate-merchant
+          type: web
+          property: hostport
+      # Set this to the gateway's own URL after the first deploy. It is what the
+      # approval link points at and where PayPal returns the buyer, so a wrong
+      # value produces links that resolve to localhost on the approver's phone.
+      - key: MANDATE_PUBLIC_URL
+        sync: false
+      # Every one of these is entered in the Render dashboard, not here. sync:false
+      # means "this blueprint does not carry the value", which is the only correct
+      # way to describe a credential in a file that is committed.
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: MANDATE_APPROVER_NUMBER
+        sync: false

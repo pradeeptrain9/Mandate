@@ -1,0 +1,15 @@
+# Keep the build context to source. Anything here either does not belong in an
+# image or would invalidate the layer cache on every run.
+.git
+.venv
+.env
+.pytest_cache
+.hypothesis
+**/__pycache__
+*.pyc
+var
+docs
+tests
+Dockerfile
+docker-compose.yml
+render.yaml

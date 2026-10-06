@@ -258,7 +258,18 @@ class Gateway:
         approver: str | None = None,
     ) -> AuthorizationResult:
         if self.paypal is None:
-            raise GatewayError("no PayPal client configured on this gateway")
+            # Recorded on the hold before raising, for the same reason every other
+            # PayPal failure is: the decision record already exists and says the
+            # purchase was allowed, so a hold sitting in `received` with no
+            # explanation reads on the dashboard as the gateway having lost track
+            # of it. The policy allowed this; the deployment cannot act on it.
+            reason = "allowed, but no PayPal client is configured on this gateway"
+            try:
+                self.store.note(record.decision_id, last_error=reason)
+            except Exception:  # noqa: BLE001 - reporting must not replace the error
+                logger.warning("could not record the missing PayPal client for %s",
+                               record.decision_id)
+            raise GatewayError(reason)
         try:
             order = await self.paypal.create_authorization_order(
                 currency=quote.currency,

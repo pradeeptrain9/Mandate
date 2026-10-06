@@ -1,0 +1,90 @@
+# Two services, one image. `docker compose up` and the demo is reachable.
+#
+# No secrets are baked in and none are defaulted. The gateway refuses to start
+# without a ledger key, which is deliberate: a committed default HMAC key would
+# mean every deployment of this project shared one, and "the audit log is signed"
+# would be worth nothing. `scripts/bootstrap_env.sh` generates them.
+
+name: mandate
+
+services:
+  merchant:
+    build: .
+    image: mandate:local
+    # The untrusted third party. It signs quotes with a secret the gateway also
+    # holds, and it serves one product page carrying a prompt injection.
+    command: >
+      sh -c "exec uvicorn mandate.merchant.app:app --host 0.0.0.0 --port 8001"
+    environment:
+      PORT: "8001"
+      MANDATE_MERCHANT_SECRET: ${MANDATE_MERCHANT_SECRET:?set it in .env -- run scripts/bootstrap_env.sh}
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/merchants', timeout=2).status == 200 else 1)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  gateway:
+    build: .
+    image: mandate:local
+    environment:
+      PORT: "8000"
+      MANDATE_LEDGER_KEY: ${MANDATE_LEDGER_KEY:?set it in .env -- run scripts/bootstrap_env.sh}
+      MANDATE_MERCHANT_SECRET: ${MANDATE_MERCHANT_SECRET:?set it in .env -- run scripts/bootstrap_env.sh}
+      MANDATE_LEDGER_RETIRED_KEYS: ${MANDATE_LEDGER_RETIRED_KEYS:-}
+      MANDATE_PUBLIC_URL: ${MANDATE_PUBLIC_URL:-http://localhost:8000}
+      MANDATE_AUTO_PLACE: ${MANDATE_AUTO_PLACE:-1}
+      # Every one of these is optional, and the README says what each unlocks.
+      # Absent PayPal credentials mean the refusal scenes and the approval path
+      # run and the capture scene does not; absent Twilio means the approval link
+      # is minted on an operator's screen instead of sent by SMS.
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_ENV: ${PAYPAL_ENV:-sandbox}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      MANDATE_APPROVER_NUMBER: ${MANDATE_APPROVER_NUMBER:-}
+      # Where the agent and the seed script reach the merchant. A service name,
+      # not localhost: inside the network each container is its own localhost.
+      MANDATE_MERCHANT_URL: http://merchant:8001
+    ports:
+      - "8000:8000"
+    volumes:
+      # Named, not a bind mount. The ledger is append-only and HMAC-signed; a
+      # bind mount would invite editing it from the host, and the whole point of
+      # the format is that an edit is detectable rather than convenient.
+      - ledger:/var/lib/mandate
+    depends_on:
+      merchant:
+        condition: service_healthy
+
+  # `docker compose --profile attack up` adds the compromised tool server. Off by
+  # default: it is an attacker, and a rig that starts one unasked is a rig nobody
+  # should copy into anything.
+  proxy:
+    build: .
+    image: mandate:local
+    profiles: ["attack"]
+    command: >
+      sh -c "exec uvicorn mandate.demo.hostile_proxy:build --factory --host 0.0.0.0 --port 8002"
+    environment:
+      PORT: "8002"
+      MANDATE_MERCHANT_URL: http://merchant:8001
+      MANDATE_TAMPER_MODE: ${MANDATE_TAMPER_MODE:-inject}
+    ports:
+      - "8002:8002"
+    depends_on:
+      merchant:
+        condition: service_healthy
+
+volumes:
+  ledger:

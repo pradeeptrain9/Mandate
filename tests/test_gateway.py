@@ -409,3 +409,74 @@ async def test_the_same_request_is_allowed_or_refused_depending_on_what_came_bef
     much_later = now + timedelta(hours=2)
     third = await ask(gateway, much_later, items=basket, at=much_later - timedelta(minutes=1))
     assert third.outcome is Outcome.ALLOW
+
+
+# -- a deployment with no PayPal credentials -------------------------------
+#
+# Supported, and what `docker compose up` does on a clean clone: every refusal and
+# the whole human-approval path work, and an allowed basket cannot be placed.
+
+
+@pytest.fixture
+def creditless(tmp_path):
+    store = Store(tmp_path / "state.db")
+    gw = Gateway(
+        store=store,
+        ledger=Ledger(tmp_path / "decisions.jsonl", LEDGER_KEY),
+        policy=demo_policy(),
+        merchant_secret=MERCHANT_SECRET,
+        paypal=None,
+        public_url="https://mandate.test",
+    )
+    yield gw
+    store.close()
+
+
+async def test_an_allowed_basket_with_no_paypal_records_why_it_stopped(creditless, now):
+    with pytest.raises(GatewayError) as caught:
+        await ask(creditless, now)
+    assert "no PayPal client" in str(caught.value)
+
+    # The decision record exists and the policy did allow it, so a hold sitting in
+    # `received` with no explanation would read as the gateway having lost track of
+    # it. The dashboard shows last_error.
+    hold = next(iter(creditless.store.list()))
+    assert hold.state is HoldState.RECEIVED
+    assert hold.last_error is not None
+    assert "no PayPal client is configured" in hold.last_error
+
+
+async def test_the_decision_is_still_recorded_and_still_replays(creditless, now):
+    with pytest.raises(GatewayError):
+        await ask(creditless, now)
+    records = list(creditless.ledger)
+    assert len(records) == 1
+    assert records[0].evaluation.outcome is Outcome.ALLOW
+    # The point of the ledger: the record is executable, credentials or not.
+    records[0].assert_replays()
+
+
+async def test_a_refusal_needs_no_credentials_at_all(creditless, now):
+    result = await ask(
+        creditless, now, items=[("SKU-GC", "Gift card", Category.GIFT_CARD, "100.00", 40)]
+    )
+    assert result.outcome is Outcome.DENY
+    assert result.state is HoldState.REFUSED
+    # Nothing was attempted at PayPal, so nothing is reported as having failed.
+    assert creditless.store.get(result.decision_id).last_error is None
+
+
+async def test_the_approval_path_needs_no_credentials_until_the_human_says_yes(creditless, now):
+    result = await ask(
+        creditless,
+        now,
+        merchant_id="m_cloudspend",
+        items=[("SKU-GPU", "GPU hour", Category.COMPUTE, "180.00", 1)],
+    )
+    assert result.outcome is Outcome.HOLD_FOR_APPROVAL
+    assert result.approval_token
+    link = creditless.issue_approval_link(result.decision_id)
+    assert link.startswith("https://mandate.test/approve/")
+    # Approving is where credentials finally matter, and it says so.
+    with pytest.raises(GatewayError, match="no PayPal client"):
+        await creditless.approve(link.rsplit("/", 1)[1], approver="ops", now=now)
