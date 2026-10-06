@@ -248,14 +248,21 @@ class GeminiBackend:
         # sees a stack trace learns nothing about the firewall. Retried here
         # rather than in the agent loop, because the loop's job is to be
         # provider-neutral and this is a property of one provider's free tier.
-        # Eight, from a measurement rather than a feeling. On a saturated free
-        # tier, three consecutive turns each succeeded on their *second* attempt
-        # and the fourth turn burned four in a row -- so four attempts sat right at
-        # the edge where a run dies for no reason but luck. The backoff is capped
-        # so eight attempts is about three minutes, not forty.
-        attempts: int = 8,
+        # Retries and pacing multiply, and that is the trap here. Eight attempts
+        # was tried first, on the reasoning that three turns had each succeeded on
+        # their second attempt. What it actually produced was a single turn
+        # grinding for thirteen minutes: every retry waits for a rate-limit slot
+        # *and then* backs off, so eight attempts cost 8 x (62s + 30s).
+        #
+        # Worse, retrying is self-defeating on this tier. Each retry spends one of
+        # the five requests a minute, so a turn that retries hard guarantees the
+        # next turn waits. Hence a deadline on the whole request rather than a
+        # count alone: fail in two and a half minutes with a message that explains
+        # the arithmetic, instead of hanging.
+        attempts: int = 5,
         backoff: float = 3.0,
-        backoff_cap: float = 30.0,
+        backoff_cap: float = 20.0,
+        deadline: float = 150.0,
         # The free tier allows five generateContent calls a minute per model, and
         # an agent turn is one call. A five-step basket therefore hits the limit
         # on its last step -- which is exactly what happened: four tools, then
@@ -276,6 +283,7 @@ class GeminiBackend:
         self._attempts = max(1, attempts)
         self._backoff = backoff
         self._backoff_cap = backoff_cap
+        self._deadline = deadline
         self._rpm = max(0, rpm)
         self._sent: deque[float] = deque(maxlen=max(1, self._rpm))
         self._http = httpx.AsyncClient(timeout=timeout, transport=transport)
@@ -303,7 +311,11 @@ class GeminiBackend:
         `--model`.
         """
         last = ""
+        started = time.monotonic()
         for attempt in range(1, self._attempts + 1):
+            if attempt > 1 and time.monotonic() - started > self._deadline:
+                last = f"{last} (gave up after {time.monotonic() - started:.0f}s)"
+                break
             await self._wait_for_a_slot()
             try:
                 response = await self._http.post(
@@ -353,12 +365,18 @@ class GeminiBackend:
                 await asyncio.sleep(pause)
 
         raise GeminiUnavailable(
-            f"Gemini {self.model} still unavailable after {self._attempts} attempts. "
-            f"Last: {last}. Free-tier capacity moves around, so another model may "
-            f"answer: --model {' | '.join(FREE_TIER_MODELS)}. Those are the names "
-            f"this code prefers, not a promise any of them works -- the models "
-            f"endpoint lists names that generateContent then refuses with a 404, "
-            f"so the only way to know is to call one."
+            f"Gemini {self.model} did not answer in {time.monotonic() - started:.0f}s. "
+            f"Last: {last}\n\n"
+            f"The free tier allows {self._rpm or 'unlimited'} requests a minute and is "
+            f"answering 503 under load, and a retry spends one of those requests -- so "
+            f"retrying harder makes an agent run slower, not more likely to finish. "
+            f"Options, in order of how well they work:\n"
+            f"  * try another model now, since capacity moves: "
+            f"--model {' | '.join(FREE_TIER_MODELS)} (names this code prefers, not a "
+            f"promise any works -- the models endpoint lists some that 404)\n"
+            f"  * run a scene that needs no model at all: stolen-credentials, duplicate\n"
+            f"  * use a paid key, where rpm is high enough for a tool loop "
+            f"(pass rpm=0 to stop pacing)"
         )
 
     async def _wait_for_a_slot(self) -> None:

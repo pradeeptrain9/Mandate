@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -391,9 +392,12 @@ async def test_exhausted_retries_name_the_model_and_the_alternatives(monkeypatch
         await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
     message = str(caught.value)
     assert "gemini-3.8-flash" in message
-    assert "after 2 attempts" in message
-    # The remedy belongs in the error, not in a reader's memory of a docs page.
+    assert "did not answer" in message
+    # The remedy belongs in the error, not in a reader's memory of a docs page --
+    # including the remedy that needs no model at all, since two scenes do not.
     assert "--model" in message
+    assert "stolen-credentials" in message
+    assert "paid key" in message
 
 
 async def test_a_read_timeout_reports_its_type_and_deadline(monkeypatch):
@@ -675,3 +679,31 @@ async def test_the_backoff_is_capped_and_jittered(monkeypatch):
     assert len(set(at_cap)) == len(at_cap)
     # Eight attempts is minutes, not an afternoon.
     assert sum(slept) < 180.0
+
+
+async def test_one_request_gives_up_on_a_deadline(monkeypatch):
+    """Retries and pacing multiply, and that is what made this necessary.
+
+    Eight attempts against a saturated free tier produced a single turn grinding
+    for thirteen minutes: each retry waits for a rate-limit slot *and then* backs
+    off. A count alone cannot bound that, because the pacing is not in the count.
+    """
+    elapsed = [0.0]
+
+    async def advance(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
+
+    sent: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(1)
+        return httpx.Response(503, json={"error": {"message": "high demand"}})
+
+    backend = gemini(handler, attempts=99, backoff=20.0, backoff_cap=20.0, deadline=60.0, rpm=0)
+    with pytest.raises(GeminiUnavailable, match="gave up after"):
+        await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+    # Stopped on the clock, not on the count: 99 attempts were allowed.
+    assert len(sent) < 10
