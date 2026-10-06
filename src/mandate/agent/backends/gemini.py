@@ -74,6 +74,12 @@ def _retry_delay(body: str) -> float | None:
     match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', body)
     return float(match.group(1)) if match else None
 
+
+#: Preference order, best first. **A name here is not a promise.** `gemini-2.5-flash`
+#: is listed by the models endpoint, has `generateContent` in its
+#: `supportedGenerationMethods`, and answers a 404 saying it "is no longer
+#: available to new users". Metadata is not capability, which is why
+#: `discover_model()` is a convenience and never a health check.
 FREE_TIER_MODELS = (
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -330,8 +336,11 @@ class GeminiBackend:
 
         raise GeminiUnavailable(
             f"Gemini {self.model} still unavailable after {self._attempts} attempts. "
-            f"Last: {last}. Free-tier capacity moves around; try another model with "
-            f"--model (reachable ones: {', '.join(FREE_TIER_MODELS)})."
+            f"Last: {last}. Free-tier capacity moves around, so another model may "
+            f"answer: --model {' | '.join(FREE_TIER_MODELS)}. Those are the names "
+            f"this code prefers, not a promise any of them works -- the models "
+            f"endpoint lists names that generateContent then refuses with a 404, "
+            f"so the only way to know is to call one."
         )
 
     async def _wait_for_a_slot(self) -> None:
@@ -460,7 +469,15 @@ class GeminiBackend:
         return out
 
     async def discover_model(self) -> str:
-        """The best free-tier model this key can actually reach."""
+        """The best free-tier model this key is *listed* as able to reach.
+
+        Not a health check, and the distinction has already cost a run. The models
+        endpoint lists `gemini-2.5-flash` with `generateContent` among its
+        supported methods, and `generateContent` then answers 404 "no longer
+        available to new users". A GET is free and tells you about metadata; only a
+        generate call tells you about capability, and this method deliberately does
+        not spend one.
+        """
         reachable = {model["name"] for model in await self.available_models()}
         for candidate in FREE_TIER_MODELS:
             if candidate in reachable:
