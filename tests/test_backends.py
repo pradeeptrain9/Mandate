@@ -8,6 +8,7 @@ difference that is a 400 rather than a warning.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -323,3 +324,106 @@ def test_haiku_gets_the_older_budget_form_and_no_effort():
 
 def test_a_dated_snapshot_is_treated_as_its_base_model():
     assert request_config("claude-opus-5-20260401")["thinking"] == {"type": "adaptive"}
+
+
+# -- the free tier being busy ------------------------------------------------
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """Retries are tested for their decisions, not for their patience."""
+    return None
+
+
+async def test_a_503_is_retried_and_then_succeeds(monkeypatch):
+    """Google answers 503 "high demand" on the free tier routinely.
+
+    Before this was retried, a scene run died with a stack trace in the middle of
+    a basket -- which tells a reader nothing about the firewall, and is the kind of
+    failure that reads as "the project is broken".
+    """
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(503, json={"error": {"code": 503, "message": "high demand"}})
+        return reply([{"text": "fine"}])
+
+    backend = gemini(handler, backoff=0.0)
+    completion = await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+    assert completion.text == "fine"
+    assert len(calls) == 3
+
+
+async def test_a_400_is_not_retried(monkeypatch):
+    """A schema this dialect refuses will be refused four times in a row.
+
+    Retrying it spends the clock and then reports the same thing, and a 400 during
+    a demo is a bug in the request, which the message should say immediately.
+    """
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(400, json={"error": {"message": "Invalid JSON payload"}})
+
+    with pytest.raises(GeminiUnavailable, match="Invalid JSON payload"):
+        await gemini(handler, backoff=0.0).complete(
+            system="s", turns=[UserTurn(text="hi")], tools=[]
+        )
+    assert len(calls) == 1
+
+
+async def test_exhausted_retries_name_the_model_and_the_alternatives(monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "high demand"}})
+
+    backend = gemini(handler, attempts=2, backoff=0.0, model="gemini-3.8-flash")
+    with pytest.raises(GeminiUnavailable) as caught:
+        await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+    message = str(caught.value)
+    assert "gemini-3.8-flash" in message
+    assert "after 2 attempts" in message
+    # The remedy belongs in the error, not in a reader's memory of a docs page.
+    assert "--model" in message
+
+
+async def test_a_read_timeout_reports_its_type_and_deadline(monkeypatch):
+    """`str(httpx.ReadTimeout())` is empty, so the message has to be built from
+    the exception's type and the configured deadline or it says nothing at all."""
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=request)
+
+    backend = gemini(handler, attempts=2, backoff=0.0, timeout=12.0)
+    with pytest.raises(GeminiUnavailable) as caught:
+        await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+    message = str(caught.value)
+    assert "ReadTimeout" in message
+    assert "12s" in message
+
+
+async def test_the_model_is_never_silently_swapped(monkeypatch):
+    """A fallback to another model would corrupt the injection finding.
+
+    That scene reports whether *a named model* resisted an instruction. If a 503
+    could quietly produce an answer from a different model, the one result this
+    project reports honestly would be unverifiable.
+    """
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url.path))
+        return httpx.Response(503, json={"error": {"message": "high demand"}})
+
+    with pytest.raises(GeminiUnavailable):
+        await gemini(handler, attempts=3, backoff=0.0, model="gemini-3.8-flash").complete(
+            system="s", turns=[UserTurn(text="hi")], tools=[]
+        )
+    assert {path.rsplit("/", 1)[-1] for path in asked} == {"gemini-3.8-flash:generateContent"}

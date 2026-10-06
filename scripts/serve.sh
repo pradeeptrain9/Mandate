@@ -7,6 +7,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# --with-proxy also starts the compromised tool server the hostile-proxy scene
+# needs. Off by default: it is an attacker, and a demo rig that runs one without
+# being asked is a demo rig nobody should copy into anything.
+WITH_PROXY=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-proxy) WITH_PROXY=1 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
 if [[ ! -f .env ]]; then
   echo "No .env. Copy .env.example and fill it in." >&2
   exit 2
@@ -28,13 +39,24 @@ MERCHANT=$!
 "$PY" -m uvicorn mandate.gateway.api:create_app --factory --port 8000 --log-level warning &
 GATEWAY=$!
 
-cleanup() { kill "$MERCHANT" "$GATEWAY" 2>/dev/null || true; }
+PROXY=
+if [[ "$WITH_PROXY" == 1 ]]; then
+  MANDATE_MERCHANT_URL=http://localhost:8001 \
+  MANDATE_TAMPER_MODE="${MANDATE_TAMPER_MODE:-inject}" \
+  "$PY" -m uvicorn mandate.demo.hostile_proxy:build --factory --port 8002 --log-level warning &
+  PROXY=$!
+fi
+
+cleanup() { kill "$MERCHANT" "$GATEWAY" ${PROXY:+"$PROXY"} 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 sleep 2
 echo "merchant  http://localhost:8001/merchants"
 echo "gateway   http://localhost:8000/health"
 echo "docs      http://localhost:8000/docs"
+if [[ "$WITH_PROXY" == 1 ]]; then
+  echo "proxy     http://localhost:8002/_tamper   (compromised tool server)"
+fi
 echo
 echo "A product page with the injection in it:"
 echo "  http://localhost:8001/merchants/m_acme/products/SKU-PAPER-A4/page"

@@ -24,7 +24,9 @@ subtracted out rather than billed twice.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -47,6 +49,14 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 #: publishing per-model free-tier limits in September 2026, so the live quota in
 #: AI Studio is the only authority; these are ordered by capability, and
 #: `discover_model` picks the first one the key can actually reach.
+logger = logging.getLogger(__name__)
+
+#: Statuses that mean "the shared free tier is busy", not "your request is wrong".
+#: 429 is in here because Google returns it for a per-minute rate limit as well as
+#: for a spent daily quota, and the two are indistinguishable from the status
+#: alone; a spent quota costs four pauses and then says so plainly.
+_RETRY_STATUSES = frozenset({429, 500, 503, 504})
+
 FREE_TIER_MODELS = (
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -187,7 +197,19 @@ class GeminiBackend:
         model: str = DEFAULT_MODEL,
         temperature: float = 0.2,
         max_output_tokens: int = 4096,
-        timeout: float = 90.0,
+        # Generous on purpose. The free tier queues, and a tool-calling turn on
+        # gemini-3.8-flash has been measured past ninety seconds -- which is what
+        # the first value here was, so every scene run died in the middle of a
+        # basket. A slow answer is still an answer; the only thing a short
+        # timeout bought was a misleading failure.
+        timeout: float = 240.0,
+        # The free tier answers 503 "high demand" and 429 "quota" often enough
+        # that a single attempt is not a usable demo: a judge who runs a scene and
+        # sees a stack trace learns nothing about the firewall. Retried here
+        # rather than in the agent loop, because the loop's job is to be
+        # provider-neutral and this is a property of one provider's free tier.
+        attempts: int = 4,
+        backoff: float = 4.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not api_key:
@@ -196,10 +218,78 @@ class GeminiBackend:
         self.model = model
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
+        self._timeout = timeout
+        self._attempts = max(1, attempts)
+        self._backoff = backoff
         self._http = httpx.AsyncClient(timeout=timeout, transport=transport)
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+    async def _post(self, body: dict[str, Any]) -> httpx.Response:
+        """One generateContent call, retried on the failures that pass.
+
+        Which failures are worth retrying is the whole content of this method:
+
+          * **503 / 429 / 500 / 504, and read timeouts** -- the shared free tier
+            being busy. Temporary by construction, and the message Google returns
+            says so.
+          * **400, 403, 404** -- a schema this dialect refuses, a key without the
+            API enabled, a withdrawn model. Retrying these burns the clock and
+            then reports the same thing, so they raise at once.
+
+        The model is never silently swapped for another on failure. It is
+        tempting -- `FREE_TIER_MODELS` is right there -- but the injection scene
+        measures whether *a named model* resisted an instruction, and a fallback
+        that quietly answered as a different model would corrupt the one finding
+        this project reports honestly. A caller who wants a different model passes
+        `--model`.
+        """
+        last = ""
+        for attempt in range(1, self._attempts + 1):
+            try:
+                response = await self._http.post(
+                    f"{BASE_URL}/{self.model}:generateContent",
+                    params={"key": self.api_key},
+                    json=body,
+                )
+            except httpx.HTTPError as exc:
+                # `str(httpx.ReadTimeout())` is the empty string, so the obvious
+                # f-string here produced "Gemini unreachable: " and told the
+                # reader nothing at all -- the failure most likely to happen on a
+                # free tier was the one the message could not name. The exception
+                # type and the deadline are both always present.
+                last = (
+                    f"{type(exc).__name__} calling {self.model}"
+                    f" (timeout {self._timeout:g}s): {exc or 'no detail'}"
+                )
+                if not isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+                    raise GeminiUnavailable(f"Gemini {last}") from exc
+            else:
+                if response.status_code == 200:
+                    return response
+                detail = response.text[:400]
+                last = f"HTTP {response.status_code}: {detail}"
+                if response.status_code not in _RETRY_STATUSES:
+                    raise GeminiUnavailable(f"Gemini request failed ({last})")
+
+            if attempt < self._attempts:
+                pause = self._backoff * (2 ** (attempt - 1))
+                logger.warning(
+                    "gemini %s unavailable (%s); retrying in %.0fs (attempt %d/%d)",
+                    self.model,
+                    last.split(":")[0],
+                    pause,
+                    attempt + 1,
+                    self._attempts,
+                )
+                await asyncio.sleep(pause)
+
+        raise GeminiUnavailable(
+            f"Gemini {self.model} still unavailable after {self._attempts} attempts. "
+            f"Last: {last}. Free-tier capacity moves around; try another model with "
+            f"--model (reachable ones: {', '.join(FREE_TIER_MODELS)})."
+        )
 
     async def complete(
         self, *, system: str, turns: list[Turn], tools: list[AgentTool]
@@ -215,22 +305,7 @@ class GeminiBackend:
         if tools:
             body["tools"] = [{"functionDeclarations": _declarations(tools)}]
 
-        try:
-            response = await self._http.post(
-                f"{BASE_URL}/{self.model}:generateContent",
-                params={"key": self.api_key},
-                json=body,
-            )
-        except httpx.HTTPError as exc:
-            raise GeminiUnavailable(f"Gemini unreachable: {exc}") from exc
-
-        if response.status_code != 200:
-            # 400 is usually a schema this dialect refuses, 429 is quota, 403 is a
-            # key without the API enabled. The body is the only thing that says
-            # which, so it is carried rather than collapsed into a status code.
-            raise GeminiUnavailable(
-                f"Gemini request failed ({response.status_code}): {response.text[:400]}"
-            )
+        response = await self._post(body)
         try:
             payload = response.json()
         except ValueError as exc:
