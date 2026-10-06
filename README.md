@@ -200,8 +200,11 @@ single one of them:
 | `non-delivery` | yes | no | Never shipped. The hold is released; the money comes back. |
 
 Three of the eight involve an adversary, and only one of those three involves persuading
-a model. **A control that only catches prompt injection misses five of the eight.** That is
-the argument for a firewall, and it is the reason these scenes exist in this proportion.
+a model. Five of them have something that must be stopped and nothing for an
+injection detector to find: `delegation`, `duplicate`, `stolen-credentials`,
+`hostile-proxy`, `non-delivery`. **A control aimed at prompt injection catches one of
+them.** That is the argument for a firewall, and it is why the scenes exist in this
+proportion rather than as one dramatic one.
 
 ### On the injection scene, honestly
 
