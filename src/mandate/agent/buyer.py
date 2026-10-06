@@ -265,7 +265,7 @@ class BuyerAgent:
             timeout=self.timeout,
         )
 
-    async def run(self, instruction: str) -> AgentRun:
+    async def run(self, instruction: str, *, on_event: Any = None) -> AgentRun:
         return await run_agent(
             backend=self.backend,
             system=SYSTEM_PROMPT,
@@ -274,6 +274,7 @@ class BuyerAgent:
             spend=self.spend,
             max_iterations=self.max_iterations,
             label="buyer-agent",
+            on_event=on_event,
         )
 
 

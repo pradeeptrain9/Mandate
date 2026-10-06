@@ -144,3 +144,30 @@ def show_cost(run_usd: float, summary: dict, provider: str, model: str) -> None:
         f"of ${summary['cap_usd']:.2f} over {summary['calls']} call(s)  "
         f"{DIM}[{provider}/{model}]{RESET}"
     )
+
+
+def progress(kind: str, detail: dict) -> None:
+    """Stream what the agent is doing, as it does it.
+
+    Written because of a measurement, not a preference: a turn on a free-tier
+    model has taken over a minute, and a scene that printed its trace only at the
+    end left three minutes of blank terminal. On a recording that is
+    indistinguishable from a hang, and the first thing a viewer concludes is that
+    the project is broken.
+    """
+    if kind == "thinking":
+        print(f"  {DIM}… turn {detail.get('iteration')} ({detail.get('model')}){RESET}", flush=True)
+    elif kind == "tool":
+        name = detail.get("name")
+        arguments = detail.get("arguments") or {}
+        extra = ""
+        if name == "get_quote":
+            lines = arguments.get("lines") or []
+            extra = "  " + ", ".join(
+                f"{line.get('quantity', 1)}×{line.get('sku')}" for line in lines
+            )
+        elif name == "browse_catalog":
+            extra = f"  {arguments.get('merchant_id')}"
+        print(f"  {CYAN}→{RESET} {name}{extra}", flush=True)
+    elif kind == "tool_done" and detail.get("failed"):
+        print(f"    {RED}failed{RESET}", flush=True)

@@ -13,12 +13,19 @@ because getting them wrong is how a loop quietly misbehaves:
   * **`max_iterations` is a hard stop.** A model that keeps asking for tools is
     stopped and said to have been stopped, rather than looping until the budget
     runs out.
+
+`on_event` exists because of how the demo actually reads. A turn on a free-tier
+model has been measured over a minute, and a scene that printed its trace only at
+the end left a judge watching a blank terminal for three -- which looks exactly
+like a hang. The callback is synchronous and its exceptions are deliberately
+swallowed: a progress line is not allowed to be the thing that kills a run.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .conversation import AgentTool, Completion, Conversation, ToolCall, Turn, Usage
@@ -98,7 +105,16 @@ async def run_agent(
     spend: SpendGuard | None = None,
     max_iterations: int = 12,
     label: str = "agent",
+    on_event: "Callable[[str, dict[str, Any]], None] | None" = None,
 ) -> AgentRun:
+    def emit(kind: str, **detail: Any) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(kind, detail)
+        except Exception:  # noqa: BLE001 - a progress line must never fail a run
+            pass
+
     by_name = {tool.name: tool for tool in tools}
     conversation = Conversation()
     conversation.user(instruction)
@@ -109,6 +125,7 @@ async def run_agent(
         if spend is not None:
             spend.check(model=backend.model)
 
+        emit("thinking", iteration=iteration, model=backend.model)
         completion = await backend.complete(
             system=system, turns=conversation.turns, tools=tools
         )
@@ -132,9 +149,11 @@ async def run_agent(
         conversation.assistant(completion)
         results: list[tuple[ToolCall, str]] = []
         for call in completion.tool_calls:
+            emit("tool", name=call.name, arguments=call.arguments)
             result_text, parsed, failed = await _invoke(by_name, call)
             results.append((call, result_text))
             run.calls.append(ExecutedCall(call.name, call.arguments, parsed, failed))
+            emit("tool_done", name=call.name, failed=failed, result=parsed)
         conversation.tool_results(results)
 
     run.stopped = f"stopped after {max_iterations} iterations without a final answer"
