@@ -25,12 +25,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from mandate.providers.toolkit import (  # noqa: E402
+    BROKEN_IN_TOOLKIT,
     DELIVERY_METHODS,
     DISPUTE_METHODS,
     SANDBOX_UNAVAILABLE,
     Toolkit,
     ToolkitError,
+    ToolkitMethodBroken,
     ToolkitUnavailableInSandbox,
+    quiet_toolkit_logging,
 )
 
 
@@ -46,13 +49,31 @@ def note(detail: str) -> None:
     print(f"        {detail}", flush=True)
 
 
-#: Read-only probes. Nothing here creates or moves anything.
+#: Read-only probes, narrowed to what Mandate actually uses. Nothing here creates
+#: or moves anything. Invoicing and the product catalog are deliberately absent:
+#: they return 403 on a merchant app without those features, and Mandate uses
+#: neither, so a failure there would be noise rather than a finding.
 PROBES: tuple[tuple[str, dict[str, object], str], ...] = (
     ("list_disputes", {"page_size": 2}, "Customer Disputes"),
-    ("list_transactions", {}, "Transaction Search"),
-    ("list_invoices", {"page_size": 2}, "Invoicing"),
-    ("list_products", {"page_size": 2}, "(no feature flag; catalog is always on)"),
 )
+
+
+def classify(message: str) -> tuple[str, str]:
+    """A 400 and a 403 mean opposite things, and conflating them sends you hunting
+    for a dashboard setting that was never the problem.
+
+    403 / NOT_AUTHORIZED  -> a Features checkbox is unticked on the app.
+    400 / INVALID_REQUEST -> the request itself is malformed; our side, or the
+                             toolkit's. No setting will fix it.
+    """
+    if "403" in message or "NOT_AUTHORIZED" in message or "PERMISSION_DENIED" in message:
+        return ("permissions", "tick the matching feature on the app in the developer dashboard")
+    if "400" in message or "INVALID_REQUEST" in message:
+        return (
+            "malformed request",
+            "not a permissions problem -- the call is built wrong and no setting fixes it",
+        )
+    return ("unknown", "read the error above")
 
 
 async def main() -> int:
@@ -66,17 +87,23 @@ async def main() -> int:
         )
         return 2
 
+    # The toolkit logs full response headers, set-cookie included, at ERROR level
+    # on the root logger for every non-2xx. Expected 403s are not emergencies and
+    # session cookies do not belong in a terminal scrollback.
+    quiet_toolkit_logging()
+
     print(f"\n\033[1mPayPal Agent Toolkit against sandbox\033[0m  ({len(Toolkit.methods())} methods)\n")
     toolkit = Toolkit(client_id, secret, sandbox=True)
 
-    print("read-only probes:")
+    print("what Mandate uses:")
     reachable = 0
     for method, params, feature in PROBES:
         try:
             result = await toolkit.call(method, **params)
         except ToolkitError as exc:
-            bad(f"{method}: {exc}")
-            note(f"if this is a permissions error, tick '{feature}' on the app")
+            kind, advice = classify(str(exc))
+            bad(f"{method}: {kind}")
+            note(advice + (f" ('{feature}')" if kind == "permissions" else ""))
             continue
         reachable += 1
         shape = (
@@ -86,24 +113,31 @@ async def main() -> int:
         )
         ok(f"{method} -> {shape}")
 
-    print("\nsandbox limitations:")
+    print("\nknown-bad paths, refused before they reach PayPal:")
+    for method, replacement in sorted(BROKEN_IN_TOOLKIT.items()):
+        try:
+            await toolkit.call(method)
+            bad(f"{method} unexpectedly worked -- the workaround may be removable")
+        except ToolkitMethodBroken:
+            ok(f"{method} refused; use {replacement}")
     for method in sorted(SANDBOX_UNAVAILABLE):
         try:
             await toolkit.call(method)
-            bad(f"{method} unexpectedly worked -- it can be used after all")
+            bad(f"{method} unexpectedly worked in sandbox")
         except ToolkitUnavailableInSandbox:
-            ok(f"{method} refused in sandbox, as expected; nothing depends on it")
+            ok(f"{method} refused in sandbox; nothing depends on it")
 
     print("\ntool schemas Mandate will hand to Claude:")
     for spec in Toolkit.specs(DELIVERY_METHODS + DISPUTE_METHODS):
         params = list(spec.input_schema.get("properties", {}))
         ok(f"{spec.method:<28} {params}")
 
-    verdict = "usable" if reachable else "NOT usable -- check the app's Features"
-    print(f"\n\033[1mVerdict:\033[0m toolkit is {verdict}.")
     print(
-        "The hold lifecycle still speaks raw REST: the toolkit has no authorize,\n"
-        "void or reauthorize, which is the whole reason providers/paypal.py exists.\n"
+        f"\n\033[1mVerdict:\033[0m {reachable}/{len(PROBES)} probe(s) reachable.\n"
+        "Disputes and shipment tracking go through the toolkit. Transaction search\n"
+        "goes through PayPalClient.search_transactions because the toolkit builds\n"
+        "start_date without a UTC offset. The hold lifecycle speaks raw REST\n"
+        "throughout: the toolkit has no authorize, void or reauthorize.\n"
     )
     return 0
 

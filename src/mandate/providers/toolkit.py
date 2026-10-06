@@ -31,12 +31,18 @@ Two sharp edges worth knowing before relying on this:
     monkeypatched in a test. Hence the `runner` seam on `Toolkit.__init__`:
     injecting a callable is cleaner than reaching into a third-party model, and it
     means the tests need no credentials and no network.
+  * `list_transactions` is **broken** -- see `BROKEN_IN_TOOLKIT`. It is refused
+    here with a pointer to the working call rather than left to fail at PayPal.
+  * The toolkit logs failed responses at ERROR level on the **root logger**,
+    including `set-cookie` header values. `quiet_toolkit_logging()` turns that
+    down; session cookies do not belong in application logs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -49,12 +55,25 @@ from paypal_agent_toolkit.shared.tools import tools as TOOLKIT_TOOLS
 #: time so a caller gets a clear error instead of a surprising one.
 SANDBOX_UNAVAILABLE: frozenset[str] = frozenset({"get_merchant_insights"})
 
+#: Methods whose toolkit implementation is broken against sandbox, with the
+#: replacement named. Listed rather than silently avoided so nobody reaches for
+#: them again in six weeks.
+BROKEN_IN_TOOLKIT: dict[str, str] = {
+    # Builds start_date from datetime.utcnow().isoformat() with no UTC offset, so
+    # PayPal answers 400 INVALID_REQUEST "Invalid date passed". Also puts the
+    # literal string "None" in the query when no transaction id is given.
+    "list_transactions": "PayPalClient.search_transactions in providers/paypal.py",
+}
+
 #: What Mandate actually uses. Deliberately narrow: an agent-facing surface that
 #: offered all 42 would hand an agent invoice creation and subscription
 #: management it has no business with.
+#:
+#: Verified live against sandbox on 2026-10-06 -- disputes and tracking work.
+#: Invoicing and the product catalog return 403 on a merchant app without those
+#: features enabled, which is fine because Mandate uses neither.
 DELIVERY_METHODS = ("create_shipment_tracking", "get_shipment_tracking", "update_shipment_tracking")
 DISPUTE_METHODS = ("list_disputes", "get_dispute")
-REPORTING_METHODS = ("list_transactions",)
 
 
 class ToolkitError(RuntimeError):
@@ -63,6 +82,10 @@ class ToolkitError(RuntimeError):
 
 class ToolkitUnavailableInSandbox(ToolkitError):
     """A method the toolkit refuses when `sandbox=True`."""
+
+
+class ToolkitMethodBroken(ToolkitError):
+    """A method whose toolkit implementation does not work, with the alternative."""
 
 
 @dataclass(frozen=True)
@@ -80,6 +103,18 @@ class ToolSpec:
             "description": self.description,
             "input_schema": self.input_schema,
         }
+
+
+def quiet_toolkit_logging(level: int = logging.CRITICAL) -> None:
+    """Stop the toolkit writing response headers -- cookies included -- to the root logger.
+
+    It calls `logging.error` directly on the root logger for any non-2xx response
+    and dumps the full header dict, `set-cookie` and all. A 403 on a feature the
+    app does not have is an expected condition here, not an emergency, and session
+    cookies in application logs are a liability regardless. Errors still surface:
+    every failure is raised as a `ToolkitError` with the method name.
+    """
+    logging.getLogger().setLevel(level)
 
 
 class Toolkit:
@@ -114,6 +149,10 @@ class Toolkit:
         if self.sandbox and method in SANDBOX_UNAVAILABLE:
             raise ToolkitUnavailableInSandbox(
                 f"{method} is not available in sandbox; do not build on it"
+            )
+        if method in BROKEN_IN_TOOLKIT:
+            raise ToolkitMethodBroken(
+                f"the toolkit's {method} is broken; use {BROKEN_IN_TOOLKIT[method]} instead"
             )
         if method not in self.methods():
             raise ToolkitError(f"{method} is not a toolkit method")
@@ -158,8 +197,9 @@ class Toolkit:
     async def dispute(self, dispute_id: str) -> Any:
         return await self.call("get_dispute", dispute_id=dispute_id)
 
-    async def transactions(self, **params: Any) -> Any:
-        return await self.call("list_transactions", **params)
+    # Deliberately no `transactions()` here. See BROKEN_IN_TOOLKIT: transaction
+    # search goes through PayPalClient.search_transactions, which formats the
+    # dates in a way PayPal accepts.
 
     # -- introspection ---------------------------------------------------
 

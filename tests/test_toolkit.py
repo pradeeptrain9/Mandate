@@ -104,3 +104,50 @@ def test_specs_are_valid_anthropic_tool_definitions():
 
 def test_specs_without_a_filter_cover_every_toolkit_method():
     assert {s.method for s in Toolkit.specs()} == Toolkit.methods()
+
+
+# -- methods the toolkit gets wrong ------------------------------------------
+
+
+async def test_list_transactions_is_refused_with_a_pointer_to_the_working_call():
+    """The toolkit builds start_date without a UTC offset and PayPal answers
+    400 INVALID_REQUEST. Refusing here, with the alternative named, beats letting
+    it fail at PayPal in six weeks' time."""
+    from mandate.providers.toolkit import BROKEN_IN_TOOLKIT, ToolkitMethodBroken
+
+    toolkit = Toolkit("cid", "secret", runner=lambda m, p: "{}")
+    with pytest.raises(ToolkitMethodBroken, match="search_transactions"):
+        await toolkit.call("list_transactions")
+    assert "list_transactions" in BROKEN_IN_TOOLKIT
+
+
+async def test_a_broken_method_is_refused_even_outside_sandbox():
+    """The bug is in parameter construction, not a sandbox limitation."""
+    from mandate.providers.toolkit import ToolkitMethodBroken
+
+    toolkit = Toolkit("cid", "secret", sandbox=False, runner=lambda m, p: "{}")
+    with pytest.raises(ToolkitMethodBroken):
+        await toolkit.call("list_transactions")
+
+
+def test_the_narrow_surface_excludes_broken_and_unavailable_methods():
+    from mandate.providers.toolkit import BROKEN_IN_TOOLKIT
+
+    used = set(DELIVERY_METHODS + DISPUTE_METHODS)
+    assert not used & set(BROKEN_IN_TOOLKIT)
+    assert not used & SANDBOX_UNAVAILABLE
+
+
+def test_quiet_toolkit_logging_turns_down_the_root_logger():
+    """The toolkit dumps response headers -- set-cookie included -- at ERROR level
+    on the root logger. Session cookies do not belong in application logs."""
+    import logging
+
+    from mandate.providers.toolkit import quiet_toolkit_logging
+
+    original = logging.getLogger().level
+    try:
+        quiet_toolkit_logging()
+        assert logging.getLogger().level == logging.CRITICAL
+    finally:
+        logging.getLogger().setLevel(original)

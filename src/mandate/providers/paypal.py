@@ -32,8 +32,9 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -92,6 +93,19 @@ class Capture:
     currency: str
     final_capture: bool
     raw: dict[str, Any]
+
+
+def _rfc3339(value: datetime) -> str:
+    """RFC 3339 with an explicit offset, URL-encoded.
+
+    Transaction Search rejects a naive timestamp. A datetime without a zone is
+    treated as UTC rather than guessed at, because the alternative is a silently
+    wrong window.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    rendered = value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S-0000")
+    return quote(rendered, safe="")
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -339,6 +353,46 @@ class PayPalClient:
             operation="refund capture",
             json_body=payload,
             request_id=request_id or _attempt_key("refund", capture_id, currency, value),
+        )
+
+    # -- reporting -------------------------------------------------------
+
+    async def search_transactions(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        fields: str = "transaction_info",
+        page_size: int = 100,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """Transaction Search, with dates PayPal will actually accept.
+
+        This exists because the Agent Toolkit's `list_transactions` is broken
+        against sandbox: it builds `start_date` from `datetime.utcnow().isoformat()`
+        without a UTC offset and PayPal answers
+        `400 INVALID_REQUEST: start_date ... Invalid date passed`. It also puts the
+        string "None" in the query when no transaction id is given. Transaction
+        Search wants RFC 3339 *with* an offset, so the formatting is done here
+        where it can be tested rather than hoped for.
+
+        Everything else merchant-side still goes through the toolkit -- disputes
+        and shipment tracking work fine. This is one call, not a policy of
+        reimplementation.
+        """
+        params = {
+            "start_date": _rfc3339(start),
+            "end_date": _rfc3339(end),
+            "fields": fields,
+            "page_size": str(page_size),
+            "page": str(page),
+        }
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        return await self._call(
+            "GET",
+            f"/v1/reporting/transactions?{query}",
+            operation="search transactions",
+            representation=False,
         )
 
     # -- webhooks --------------------------------------------------------

@@ -356,3 +356,66 @@ async def test_idempotency_keys_fit_paypals_header_limit():
     async with client(handler) as pp:
         await pp.capture_authorization("A" * 300, currency="USD", value="20.00")
     assert len(keys[0]) <= 108
+
+
+# -- transaction search ------------------------------------------------------
+#
+# The Agent Toolkit's list_transactions is broken against sandbox: it builds
+# start_date from datetime.utcnow().isoformat() with no UTC offset and PayPal
+# answers 400 INVALID_REQUEST "Invalid date passed". Hence this one call living
+# here, where the formatting can be tested.
+
+
+@pytest.mark.asyncio
+async def test_transaction_search_sends_an_offset_qualified_timestamp():
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth2/token":
+            return ok(TOKEN)
+        seen["query"] = str(request.url.query, "ascii")
+        return ok({"transaction_details": []})
+
+    from datetime import datetime, timezone
+
+    async with client(handler) as pp:
+        await pp.search_transactions(
+            start=datetime(2026, 9, 5, 8, 49, 4, tzinfo=timezone.utc),
+            end=datetime(2026, 10, 6, 8, 49, 4, tzinfo=timezone.utc),
+        )
+    # The exact shape the toolkit failed to send: an explicit offset on both ends.
+    assert "start_date=2026-09-05T08%3A49%3A04-0000" in seen["query"]
+    assert "end_date=2026-10-06T08%3A49%3A04-0000" in seen["query"]
+    # And no literal "None" smuggled into the query, which the toolkit also did.
+    assert "None" not in seen["query"]
+
+
+@pytest.mark.asyncio
+async def test_transaction_search_normalises_a_non_utc_offset():
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth2/token":
+            return ok(TOKEN)
+        seen["query"] = str(request.url.query, "ascii")
+        return ok({"transaction_details": []})
+
+    from datetime import datetime, timedelta, timezone
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    async with client(handler) as pp:
+        await pp.search_transactions(
+            start=datetime(2026, 9, 5, 14, 19, 4, tzinfo=ist),
+            end=datetime(2026, 9, 6, 14, 19, 4, tzinfo=ist),
+        )
+    assert "start_date=2026-09-05T08%3A49%3A04-0000" in seen["query"]
+
+
+def test_a_naive_datetime_is_read_as_utc_rather_than_guessed():
+    from datetime import datetime, timezone
+
+    from mandate.providers.paypal import _rfc3339
+
+    naive = datetime(2026, 9, 5, 8, 49, 4)
+    aware = datetime(2026, 9, 5, 8, 49, 4, tzinfo=timezone.utc)
+    assert _rfc3339(naive) == _rfc3339(aware)

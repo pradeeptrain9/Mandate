@@ -101,10 +101,33 @@ instead, which takes client credentials directly and carries the same 42 tools
 Nothing structural changes: that surface was only ever for invoices, disputes,
 tracking and reporting, and the hold lifecycle speaks raw REST regardless.
 
-Two sharp edges found while wiring it up, both now pinned by tests:
-`get_merchant_insights` **raises** in sandbox rather than returning empty data,
-so the dashboard cannot be built on it; and `PayPalAPI.run` is synchronous, so
-every call goes through `asyncio.to_thread` rather than blocking the event loop.
+Three sharp edges found by running it against the real sandbox, all now pinned by
+tests rather than left as folklore:
+
+- **`list_transactions` is broken.** It builds `start_date` from
+  `datetime.utcnow().isoformat()` with no UTC offset, so PayPal answers
+  `400 INVALID_REQUEST: Invalid date passed`, and it puts the literal string
+  `"None"` in the query when no transaction id is given. Transaction search
+  therefore goes through `PayPalClient.search_transactions`, where the RFC 3339
+  formatting is tested. `BROKEN_IN_TOOLKIT` names the method and its replacement
+  so nobody reaches for it again, and calling it raises with that pointer rather
+  than failing at PayPal.
+- **`get_merchant_insights` raises in sandbox** rather than returning empty data,
+  so the dashboard cannot be built on it.
+- **`PayPalAPI.run` is synchronous**, so every call goes through
+  `asyncio.to_thread` rather than blocking the event loop. It is also a Pydantic
+  model with assignment forbidden and so cannot be monkeypatched, hence the
+  injectable `runner` seam on `Toolkit`.
+
+One more worth knowing: the toolkit logs failed responses at ERROR level on the
+**root logger**, including `set-cookie` header values. `quiet_toolkit_logging()`
+turns that down. Expected 403s on features an app does not have are not
+emergencies, and session cookies do not belong in application logs. Failures
+still surface -- every one is raised as a `ToolkitError` naming the method.
+
+Verified live on 2026-10-06: `list_disputes` works. Invoicing and the product
+catalog return 403 without those features enabled on the app, which is fine
+because Mandate uses neither.
 
 ### Connecting a real agent
 
