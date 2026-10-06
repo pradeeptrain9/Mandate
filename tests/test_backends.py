@@ -509,3 +509,94 @@ async def test_a_call_without_a_signature_sends_no_empty_field():
     )
     model_turn = [c for c in sent[0]["contents"] if c["role"] == "model"][0]
     assert "thoughtSignature" not in model_turn["parts"][0]
+
+
+async def test_requests_are_paced_to_stay_inside_the_free_tier_window(monkeypatch):
+    """Five requests a minute is the free tier's limit, and a turn is a request.
+
+    A five-step basket hit it on the last step, and retrying made it worse: each
+    retry spends another request from the same window. So the sixth request waits
+    rather than being refused.
+    """
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    backend = gemini(lambda r: reply([{"text": "ok"}]), rpm=3)
+    for _ in range(5):
+        await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+
+    # Three fit in the window; the fourth and fifth each wait for one to age out.
+    assert len(slept) == 2
+    assert all(0 < pause <= 62.0 for pause in slept)
+
+
+async def test_rpm_zero_disables_pacing():
+    """A paid key has a different limit, and the pacer should not be the thing
+    that makes it slow."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return reply([{"text": "ok"}])
+
+    backend = gemini(handler, rpm=0)
+    for _ in range(8):
+        await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+    assert len(calls) == 8
+
+
+async def test_a_429_waits_for_the_window_not_the_backoff(monkeypatch):
+    """Four seconds does not refill a per-minute quota."""
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    sent: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(1)
+        if len(sent) == 1:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "code": 429,
+                        "message": "Quota exceeded",
+                        "details": [{"retryDelay": "41s"}],
+                    }
+                },
+            )
+        return reply([{"text": "ok"}])
+
+    backend = gemini(handler, backoff=4.0, rpm=0)
+    completion = await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+    assert completion.text == "ok"
+    # Google's own RetryInfo wins over the backoff schedule: it is the only thing
+    # that knows whether the spent window was the minute's or the day's.
+    assert slept == [41.0]
+
+
+async def test_a_429_without_retry_info_waits_a_full_window(monkeypatch):
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    sent: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(1)
+        if len(sent) == 1:
+            return httpx.Response(429, json={"error": {"message": "Quota exceeded"}})
+        return reply([{"text": "ok"}])
+
+    await gemini(handler, backoff=4.0, rpm=0).complete(
+        system="s", turns=[UserTurn(text="hi")], tools=[]
+    )
+    assert slept == [62.0]

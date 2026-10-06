@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
@@ -103,6 +104,16 @@ async def main() -> int:
         "injection is a property of that model, so it is worth measuring",
     )
     args = parser.parse_args()
+
+    # The backend pauses to stay inside the free tier's five-requests-a-minute
+    # window, and a pause nobody is told about is a hang. Shown at INFO, dimmed,
+    # because it is the rig talking rather than the demo.
+    logging.basicConfig(
+        level=logging.INFO,
+        format=f"{DIM}  %(message)s{RESET}",
+        stream=sys.stderr,
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     if args.list:
         return list_scenes()

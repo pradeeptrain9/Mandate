@@ -27,7 +27,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import time
 import uuid
+from collections import deque
 from typing import Any
 
 import httpx
@@ -56,6 +59,20 @@ logger = logging.getLogger(__name__)
 #: for a spent daily quota, and the two are indistinguishable from the status
 #: alone; a spent quota costs four pauses and then says so plainly.
 _RETRY_STATUSES = frozenset({429, 500, 503, 504})
+
+#: The free tier counts requests over a trailing minute.
+_WINDOW_SECONDS = 62.0
+
+
+def _retry_delay(body: str) -> float | None:
+    """Google's RetryInfo, when the 429 carries one.
+
+    Preferred over a guess: it is the only thing that knows whether the limit that
+    was hit was the per-minute one or the daily one, and a daily quota should not
+    be retried in a minute.
+    """
+    match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', body)
+    return float(match.group(1)) if match else None
 
 FREE_TIER_MODELS = (
     "gemini-3.8-flash",
@@ -220,6 +237,14 @@ class GeminiBackend:
         # provider-neutral and this is a property of one provider's free tier.
         attempts: int = 4,
         backoff: float = 4.0,
+        # The free tier allows five generateContent calls a minute per model, and
+        # an agent turn is one call. A five-step basket therefore hits the limit
+        # on its last step -- which is exactly what happened: four tools, then
+        # `429 Quota exceeded for metric: generate_content_free_tier_requests,
+        # limit: 5`. Retrying into a per-minute window does not help, because each
+        # retry spends another request from the same window. So the requests are
+        # paced instead, and a scene takes the time it takes.
+        rpm: int = 5,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not api_key:
@@ -231,6 +256,8 @@ class GeminiBackend:
         self._timeout = timeout
         self._attempts = max(1, attempts)
         self._backoff = backoff
+        self._rpm = max(0, rpm)
+        self._sent: deque[float] = deque(maxlen=max(1, self._rpm))
         self._http = httpx.AsyncClient(timeout=timeout, transport=transport)
 
     async def aclose(self) -> None:
@@ -257,6 +284,7 @@ class GeminiBackend:
         """
         last = ""
         for attempt in range(1, self._attempts + 1):
+            await self._wait_for_a_slot()
             try:
                 response = await self._http.post(
                     f"{BASE_URL}/{self.model}:generateContent",
@@ -285,6 +313,11 @@ class GeminiBackend:
 
             if attempt < self._attempts:
                 pause = self._backoff * (2 ** (attempt - 1))
+                if "429" in last:
+                    # A spent per-minute window needs the window to pass, and
+                    # four seconds does not. Google's own retryDelay is used when
+                    # it sends one, because it knows which window was spent.
+                    pause = max(pause, _retry_delay(last) or _WINDOW_SECONDS)
                 logger.warning(
                     "gemini %s unavailable (%s); retrying in %.0fs (attempt %d/%d)",
                     self.model,
@@ -300,6 +333,33 @@ class GeminiBackend:
             f"Last: {last}. Free-tier capacity moves around; try another model with "
             f"--model (reachable ones: {', '.join(FREE_TIER_MODELS)})."
         )
+
+    async def _wait_for_a_slot(self) -> None:
+        """Hold the next request until the free tier's window has room.
+
+        A sliding window rather than a fixed one: the limit is counted over the
+        trailing minute, and a fixed bucket would let five requests at 0:59 and
+        five more at 1:01 through, which is the shape that produces the 429 this
+        exists to avoid.
+        """
+        if not self._rpm:
+            return
+        now = time.monotonic()
+        while len(self._sent) == self._sent.maxlen:
+            oldest = self._sent[0]
+            wait = (oldest + _WINDOW_SECONDS) - now
+            if wait <= 0:
+                self._sent.popleft()
+                break
+            logger.info(
+                "pacing gemini: %d requests in the last minute, waiting %.0fs",
+                len(self._sent),
+                wait,
+            )
+            await asyncio.sleep(wait)
+            now = time.monotonic()
+            self._sent.popleft()
+        self._sent.append(now)
 
     async def complete(
         self, *, system: str, turns: list[Turn], tools: list[AgentTool]
