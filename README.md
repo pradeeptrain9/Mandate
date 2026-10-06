@@ -65,10 +65,13 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `agent/budget.py` | **Done.** Model spend priced from reported usage, hard cap checked before every turn. |
 | `demo/` scenes | **Done, eight of them.** Five need no deceived model and one needs no attacker at all. Run with `scripts/run_scene.py`. |
 | `demo/hostile_proxy.py` | **Done.** A compromised tool server that tampers with a quote *before* the merchant signs it, so the signature the gateway checks is genuine. |
-| Delivery oracle, webhooks, expiry job, approval SMS | Week 3. |
+| `delivery/` oracle | **Done.** A three-value contract — delivered, not yet, never, cannot tell — with a carrier adapter. An unreachable carrier is *cannot tell*, never *never*. |
+| `gateway/webhooks.py` | **Done.** Signature-verified over the raw signed bytes, deduplicated after verification, and structurally unable to create a hold or change an amount. |
+| `gateway/sweep.py` | **Done.** Captures on confirmed delivery, releases on non-delivery, and releases rather than captures when a lapsing hold cannot be confirmed. |
+| Approval SMS | Week 3. |
 | AG Grid dashboard, Render deploy | Week 4. |
 
-269 tests pass. None of them need credentials or a network.
+313 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -281,6 +284,56 @@ ledger and hold database, with the gateway stopped.
 
 There is deliberately no endpoint for this. A service that can erase its own audit log on
 request is not one you would put in front of money, whatever the demo convenience.
+
+## Settling held money
+
+Two halves, and they are deliberately separate.
+
+**PayPal tells us things.** `POST /v1/webhooks/paypal` is the only endpoint a stranger can
+post JSON at, so it verifies before it believes anything — handing PayPal's own verifier the
+*raw bytes* that were signed, because a parsed-and-reserialised body is not guaranteed to
+reproduce them. A gateway with no `PAYPAL_WEBHOOK_ID` rejects everything rather than
+accepting "just for local development". Event ids are remembered *after* verification, not
+before: registering an id first would let anyone who can guess one make the genuine delivery
+that follows look like a replay.
+
+No event can create a hold, change an amount, or move money. They say what happened at
+PayPal and nothing else. If PayPal reports a transition our state machine forbids — a
+captured hold now held — it is recorded as a **disagreement** rather than resolved in
+PayPal's favour, because overwriting the state destroys the evidence that our model is
+wrong. A capture in a currency other than the hold's sets no figure at all: `Money` refuses
+cross-currency arithmetic, and a guess would be a wrong number in a financial record.
+
+**We ask whether the goods arrived.** The oracle answers with four values, not a boolean:
+
+| Answer | What the sweep does |
+|---|---|
+| delivered | capture |
+| never shipped | void |
+| still in transit | leave it alone |
+| in transit, authorization about to lapse | **void** |
+| cannot tell | never capture; void only if about to lapse |
+
+**Uncertainty resolves towards not taking the money.** This is the one design decision in
+the project most worth disagreeing with, so here is the reasoning. The obvious choice is to
+capture before an authorization lapses, since a merchant who shipped and is not paid will be
+upset. It is wrong because capture is the irreversible half of this system: void the wrong
+hold and the merchant reauthorizes, which is an inconvenience; capture the wrong one and the
+money is gone, and the only route back depends on the goodwill of whoever took it. An agent
+spending unsupervised has to fail in the direction that is recoverable.
+
+```bash
+curl -X POST localhost:8000/v1/ops/sweep -H 'content-type: application/json' \
+     -d '{"oracle":"carrier","grace_hours":24}'
+```
+
+An operator route, not a background thread: something that captures money on a timer inside
+a web process is something nobody can point at when asked what ran. It goes through the same
+`capture` and `void` the HTTP routes use, so there is no second code path for moving money,
+and it is asserted absent from `/v1/agent/*` — an agent that could trigger a sweep could pay
+itself. It also never consults the policy engine, because the policy decided when the order
+was created; re-deciding at capture time would let a basket be refused *after* the buyer had
+committed their funds.
 
 ## How PayPal is used
 

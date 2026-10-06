@@ -579,17 +579,46 @@ async def non_delivery(ctx: SceneContext) -> int:
         finding("Delivered.", "Nothing to void; this scene needs the non-shipping merchant.", good=False)
         return 1
 
-    rule("Releasing the hold")
-    async with httpx.AsyncClient(timeout=30.0) as http:
-        voided = await http.post(
-            f"{ctx.gateway_url.rstrip('/')}/v1/ops/holds/{decision_id}/void",
-            json={"reason": "delivery oracle reports never_shipped"},
+    rule("Running the sweep")
+    note(
+        """
+Not a hand-written void. The same POST /v1/ops/sweep an operator or a cron entry
+calls, asking the carrier about every held authorization and settling what it can.
+
+Its rule, in full: delivered captures, never-shipped voids, in-transit waits, and
+anything it cannot confirm by the time the authorization is about to lapse is
+released rather than captured. Uncertainty resolves towards not taking the money,
+because a wrongly voided hold costs a reauthorization and a wrongly captured one
+costs money that only returns on someone else's goodwill.
+"""
+    )
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        swept = await http.post(
+            f"{ctx.gateway_url.rstrip('/')}/v1/ops/sweep",
+            json={"oracle": "carrier", "grace_hours": 24},
         )
-    if voided.status_code >= 300:
-        finding("Void failed.", voided.text[:300], good=False)
+    if swept.status_code >= 300:
+        finding("The sweep failed.", swept.text[:300], good=False)
         return 1
-    hold = (voided.json().get("hold") or {})
-    print(f"  state: {GREEN}{BOLD}{hold.get('state')}{RESET}   captured: {hold.get('captured')}")
+    report = swept.json()
+    print(f"  oracle:  {report.get('oracle')}   checked: {report.get('checked')}")
+    for entry in report.get("actions") or []:
+        mark = GREEN if entry["action"].startswith("voided") else DIM
+        print(
+            f"    {mark}{entry['action']:<18}{RESET} {entry['decision_id']}"
+            f"  delivery={entry['delivery']}  → {entry['state']}"
+        )
+
+    mine = [a for a in report.get("actions") or [] if a["decision_id"] == decision_id]
+    if not mine:
+        finding("Not swept.", "The sweep did not report on this hold.", good=False)
+        return 1
+    if not mine[0]["action"].startswith("voided"):
+        finding("Not released.", f"the sweep chose {mine[0]['action']}", good=False)
+        return 1
+
+    hold = (await _hold_json(ctx, decision_id)) or {}
+    print(f"\n  state: {GREEN}{BOLD}{hold.get('state')}{RESET}   captured: {hold.get('captured')}")
     finding(
         "The money came back.",
         "No dispute, no refund, no chargeback, no human. The capture simply never\n"
@@ -597,6 +626,16 @@ async def non_delivery(ctx: SceneContext) -> int:
         good=True,
     )
     return 0
+
+
+async def _hold_json(ctx: SceneContext, decision_id: str) -> dict | None:
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        response = await http.get(
+            f"{ctx.gateway_url.rstrip('/')}/v1/agent/authorizations/{decision_id}"
+        )
+    if response.status_code >= 300:
+        return None
+    return response.json().get("hold")
 
 
 async def _await_state(ctx: SceneContext, decision_id: str, *, want: str, seconds: float) -> str:
