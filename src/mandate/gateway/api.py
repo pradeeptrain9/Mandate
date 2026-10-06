@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from ..delivery.carrier import AlwaysDelivers, MerchantCarrier, NeverDelivers
 from ..engine.money import Money
 from ..engine.policy import Outcome
 from ..ledger.codec import dec_quote
@@ -38,6 +39,7 @@ from ..providers.paypal import LIVE, SANDBOX, PayPalClient
 from .service import AuthorizationRequest, Gateway, GatewayError, WebhookRejected
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
+from .sweep import sweep
 
 agent_router = APIRouter(prefix="/v1/agent", tags=["agent"])
 webhook_router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
@@ -304,6 +306,58 @@ async def paypal_webhook(request: Request, gw: Gateway = Depends(gateway)) -> di
         "to_state": outcome.to_state,
         "detail": outcome.detail,
     }
+
+
+class SweepBody(BaseModel):
+    grace_hours: float = Field(default=24.0, ge=0, le=24 * 29)
+    oracle: str = Field(
+        default="carrier",
+        description="carrier | never | always. Anything but 'carrier' is for demos.",
+    )
+
+
+@ops_router.post("/sweep")
+async def run_sweep(body: SweepBody, gw: Gateway = Depends(gateway)) -> dict:
+    """Settle every held authorization that can be settled.
+
+    An operator route rather than a background thread inside the web process. A
+    sweep captures money, and a thing that captures money on a timer inside a
+    request handler's process is a thing nobody can point at when asked what ran.
+    Here it is a call with a caller -- cron, a Render job, or a person -- and the
+    report is its answer.
+    """
+    oracle = _oracle(body.oracle)
+    report = await sweep(
+        gw, oracle=oracle, grace=timedelta(hours=body.grace_hours)
+    )
+    return {
+        "at": report.at.isoformat(),
+        "oracle": oracle.name,
+        "checked": report.checked,
+        "summary": report.summary(),
+        "actions": [
+            {
+                "decision_id": a.decision_id,
+                "delivery": a.delivery.value,
+                "action": a.action,
+                "state": a.state,
+                "detail": a.detail,
+            }
+            for a in report.actions
+        ],
+    }
+
+
+def _oracle(name: str):
+    if name == "never":
+        return NeverDelivers()
+    if name == "always":
+        return AlwaysDelivers()
+    if name == "carrier":
+        return MerchantCarrier(
+            os.environ.get("MANDATE_MERCHANT_URL", "http://localhost:8001")
+        )
+    raise HTTPException(400, f"unknown oracle {name!r}; use carrier, never or always")
 
 
 @ops_router.get("/decisions")

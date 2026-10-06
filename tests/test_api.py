@@ -393,3 +393,31 @@ def test_the_webhook_route_is_not_on_the_agent_surface(client):
     agent_paths = [path for path in paths if path.startswith("/v1/agent")]
     assert agent_paths
     assert not any("webhook" in path for path in agent_paths)
+
+
+# -- the sweep route --------------------------------------------------------
+
+
+def test_the_sweep_route_reports_what_it_did(client):
+    response = client.post("/v1/ops/sweep", json={"oracle": "never"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["oracle"] == "never-delivers"
+    assert body["checked"] == 0
+    assert body["summary"] == {}
+
+
+def test_an_unknown_oracle_is_refused(client):
+    response = client.post("/v1/ops/sweep", json={"oracle": "trust-me"})
+    assert response.status_code == 400
+
+
+def test_the_agent_cannot_run_a_sweep(client):
+    """A sweep captures money. An agent that could trigger one could pay itself.
+
+    Asserted against the generated schema, so adding the route under the wrong
+    prefix fails here rather than in review.
+    """
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/v1/ops/sweep" in paths
+    assert not any(path.startswith("/v1/agent") and "sweep" in path for path in paths)
