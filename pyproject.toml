@@ -37,6 +37,12 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The dashboard is an .html file inside the package, so it has to be declared or a
+# wheel installs without it and /v1/ops/dashboard 500s only after deployment --
+# which is the worst moment to find out.
+[tool.setuptools.package-data]
+mandate = ["gateway/static/*.html"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src", "tests"]
 testpaths = ["tests"]

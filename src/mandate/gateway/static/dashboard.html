@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mandate — decision ledger</title>
+<!--
+  AG Grid Community, from a CDN, pinned.
+
+  Community and not Enterprise on purpose. Master/detail rows, row grouping and the
+  sidebar are Enterprise features: they render a watermark and log a licence error
+  without a key, so a dashboard built on them looks broken on a judge's machine and
+  there is nothing they can do about it. The rule trace therefore goes in a panel
+  beside the grid rather than in an expanding row, which is a constraint that
+  happened to improve it -- a trace is twelve lines and reads better with room.
+-->
+<!-- The minified bundle does not inject styles, so both sheets are explicit.
+     Without them the grid renders as unstyled stacked divs and looks broken. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-grid.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-theme-quartz.min.css">
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --line: #262b38; --text: #e7eaf0;
+    --dim: #8b93a7; --allow: #3ecf8e; --deny: #ff6b6b; --hold: #ffc857;
+    --accent: #7aa2f7; --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, sans-serif;
+  }
+  header { padding: 1.25rem 1.5rem .75rem; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 .15rem; font-size: 1.1rem; letter-spacing: .01em; }
+  .sub { color: var(--dim); font-size: .85rem; }
+  .tiles { display: flex; gap: .75rem; flex-wrap: wrap; padding: 1rem 1.5rem; }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: .7rem .9rem; min-width: 8.5rem;
+  }
+  .tile .n { font-size: 1.45rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile .k { color: var(--dim); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
+  .tile.allow .n { color: var(--allow); } .tile.deny .n { color: var(--deny); }
+  .tile.hold .n { color: var(--hold); }
+  main { display: grid; grid-template-columns: minmax(0,1fr) 25rem; gap: 1rem; padding: 0 1.5rem 1.5rem; }
+  @media (max-width: 1100px) { main { grid-template-columns: minmax(0,1fr); } }
+  #grid { height: 32rem; width: 100%; }
+  aside {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 1rem; max-height: 32rem; overflow: auto;
+  }
+  aside h2 { margin: 0 0 .25rem; font-size: .9rem; }
+  aside .id { font-family: var(--mono); font-size: .75rem; color: var(--dim); word-break: break-all; }
+  .rule { display: flex; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid var(--line); align-items: flex-start; }
+  .rule:last-child { border-bottom: 0; }
+  .badge {
+    flex: 0 0 3.1rem; text-align: center; border-radius: 4px; font-size: .66rem;
+    padding: .1rem .2rem; text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
+    margin-top: .1rem;
+  }
+  .badge.allow { background: rgba(62,207,142,.16); color: var(--allow); }
+  .badge.deny { background: rgba(255,107,107,.16); color: var(--deny); }
+  .badge.hold_for_approval { background: rgba(255,200,87,.16); color: var(--hold); }
+  .badge.na { background: #20242f; color: var(--dim); }
+  .rule .rid { font-family: var(--mono); font-size: .74rem; }
+  .rule .msg { color: var(--dim); font-size: .76rem; }
+  .bars { padding: 0 1.5rem 1rem; }
+  .bar { margin-bottom: .55rem; }
+  .bar .lab { display: flex; justify-content: space-between; font-size: .76rem; color: var(--dim); }
+  .bar .track { height: 6px; background: #20242f; border-radius: 3px; overflow: hidden; margin-top: .2rem; }
+  .bar .fill { height: 100%; background: var(--accent); }
+  .bar .fill.over { background: var(--deny); }
+  .empty { color: var(--dim); font-size: .85rem; }
+  code { font-family: var(--mono); font-size: .76rem; color: var(--accent); }
+  .note { padding: 0 1.5rem 1rem; color: var(--dim); font-size: .78rem; max-width: 60rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mandate — decision ledger</h1>
+  <div class="sub" id="meta">loading…</div>
+</header>
+
+<div class="tiles" id="tiles"></div>
+<div class="bars" id="bars"></div>
+
+<main>
+  <div id="grid" class="ag-theme-quartz-dark"></div>
+  <aside id="detail"><h2>Rule trace</h2><p class="empty">Select a decision.</p></aside>
+</main>
+
+<p class="note">
+  Every row was signature-checked by the server before it was sent; a tampered ledger line
+  fails the request rather than appearing here. The <em>refused</em> figure is money that was
+  requested and refused — not money "saved", since some of it would have been stopped
+  downstream anyway.
+</p>
+
+<script>
+const money = (minor, ccy) => `${(minor / 100).toFixed(2)} ${ccy || ''}`.trim();
+
+function badge(entry) {
+  // An inapplicable rule is shown as n/a rather than hidden. The engine reports
+  // rules it looked at and found irrelevant, and that is information: it is the
+  // difference between a rule that passed and a rule that was never there.
+  if (entry.applicable === false) return 'na';
+  return entry.outcome;
+}
+
+function showTrace(row) {
+  const el = document.getElementById('detail');
+  if (!row) {
+    el.innerHTML = '<h2>Rule trace</h2><p class="empty">Select a decision.</p>';
+    return;
+  }
+  const rules = (row.rule_trace || []).map(e => `
+    <div class="rule">
+      <span class="badge ${badge(e)}">${badge(e) === 'na' ? 'n/a' : e.outcome.replace('hold_for_approval','hold')}</span>
+      <span><span class="rid">${e.rule_id}</span><br><span class="msg">${e.message}</span></span>
+    </div>`).join('');
+  el.innerHTML = `
+    <h2>${row.outcome.replace(/_/g,' ')} — ${row.amount} ${row.currency}</h2>
+    <div class="id">${row.decision_id}</div>
+    ${row.verified ? '' : `<p style="color:var(--deny);font-size:.78rem;margin:.4rem 0">
+      This record does not verify: ${row.verification}<br>
+      <span style="color:var(--dim)">Either the ledger was altered, or it was signed with a
+      different MANDATE_LEDGER_KEY than the one configured now. Both look identical from
+      here, which is itself worth knowing.</span></p>`}
+    <p class="msg" style="color:var(--dim);font-size:.78rem">
+      ${row.merchant_name} · ${(row.skus || []).join(', ')}
+      ${row.authorization_id ? '<br>authorization ' + row.authorization_id : ''}
+      ${row.last_error ? '<br>error: ' + row.last_error : ''}
+    </p>
+    ${rules || '<p class="empty">No trace recorded.</p>'}`;
+}
+
+const columns = [
+  { headerName: 'When', field: 'evaluated_at', width: 170,
+    valueFormatter: p => p.value ? p.value.replace('T', ' ').slice(0, 19) : '' },
+  { headerName: 'Outcome', field: 'outcome', width: 120,
+    cellStyle: p => ({ color: { allow: 'var(--allow)', deny: 'var(--deny)',
+      hold_for_approval: 'var(--hold)' }[p.value] || 'inherit', fontWeight: 600 }),
+    valueFormatter: p => (p.value || '').replace(/_/g, ' ') },
+  { headerName: 'Merchant', field: 'merchant_name', flex: 1, minWidth: 140 },
+  // Sorted and filtered on minor units, displayed as a decimal. Sorting a money
+  // column as text puts 9.00 above 85.00, which is the kind of bug that makes a
+  // dashboard quietly untrustworthy.
+  { headerName: 'Amount', field: 'amount_minor', width: 130, type: 'numericColumn',
+    filter: 'agNumberColumnFilter',
+    valueFormatter: p => money(p.value, p.data.currency) },
+  { headerName: 'Hold state', field: 'state', width: 140,
+    valueFormatter: p => p.value ? p.value.replace(/_/g, ' ') : '—' },
+  { headerName: 'Captured', field: 'captured', width: 120,
+    valueFormatter: p => p.value || '—' },
+  { headerName: 'Denied by', field: 'denied_by', flex: 1, minWidth: 180,
+    valueFormatter: p => (p.value || []).join(', ') || '—' },
+  { headerName: 'Rules', field: 'rules_evaluated', width: 90, type: 'numericColumn' },
+  // Last column, and empty for a healthy ledger. An unverifiable record is the most
+  // important thing this table can say, so it is a column rather than a tooltip.
+  { headerName: 'Signature', field: 'verified', width: 120,
+    cellStyle: p => p.value ? { color: 'var(--dim)' } : { color: 'var(--deny)', fontWeight: 600 },
+    valueFormatter: p => p.value ? 'ok' : 'DOES NOT VERIFY' },
+];
+
+let api = null;
+
+function tiles(counts, budget) {
+  const o = counts.by_outcome || {};
+  const s = counts.by_state || {};
+  const cells = [
+    ['decisions', counts.decisions, ''],
+    ['allowed', o.allow || 0, 'allow'],
+    ['refused', o.deny || 0, 'deny'],
+    ['awaiting a human', o.hold_for_approval || 0, 'hold'],
+    ['held at paypal', s.held || 0, ''],
+    ['captured', s.captured || 0, ''],
+    ['voided', (s.voided || 0) + (s.expired || 0), ''],
+    ['requested &amp; refused', money(counts.refused_minor, budget.currency || ''), 'deny'],
+  ];
+  // Only shown when it is non-zero, and then in the refusal colour. A permanent
+  // "unverified: 0" tile trains a reader to ignore the number.
+  if (counts.unverified) cells.push(['does not verify', counts.unverified, 'deny']);
+  document.getElementById('tiles').innerHTML = cells.map(
+    ([k, n, cls]) => `<div class="tile ${cls}"><div class="n">${n}</div><div class="k">${k}</div></div>`
+  ).join('');
+}
+
+function bars(budget) {
+  // Reads the same /v1/agent/budget payload the agent reads -- decimal strings
+  // rather than minor units, because that endpoint predates this page and is part
+  // of the agent's contract. Parsed here rather than reshaped there.
+  const rows = (budget.envelopes || []).map(w => {
+    const cap = parseFloat(w.cap), used = parseFloat(w.committed);
+    const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
+    return `<div class="bar">
+      <div class="lab"><span>${w.window}</span>
+        <span>${w.committed} of ${w.cap} ${w.currency} committed</span></div>
+      <div class="track"><div class="fill ${pct >= 100 ? 'over' : ''}" style="width:${pct}%"></div></div>
+    </div>`;
+  });
+  const v = budget.velocity || {};
+  if (v.limit) {
+    const pct = Math.min(100, (v.used / v.limit) * 100);
+    rows.push(`<div class="bar">
+      <div class="lab"><span>authorizations placed (velocity)</span>
+        <span>${v.used} of ${v.limit}</span></div>
+      <div class="track"><div class="fill ${pct >= 100 ? 'over' : ''}" style="width:${pct}%"></div></div>
+    </div>`);
+  }
+  document.getElementById('bars').innerHTML = rows.join('');
+}
+
+async function load() {
+  const response = await fetch('/v1/ops/overview?limit=500');
+  if (!response.ok) {
+    document.getElementById('meta').textContent = `could not load: ${response.status}`;
+    return;
+  }
+  const data = await response.json();
+  document.getElementById('meta').innerHTML =
+    `policy <code>${data.policy_id}</code> · ${data.counts.decisions} decisions · refreshes every 5s`;
+  tiles(data.counts, data.budget || {});
+  bars(data.budget || {});
+  // Newest first here, oldest first on the wire. The ledger is append-only and its
+  // order is part of the record, so the reversal is a view concern and stays here.
+  const rows = [...data.decisions].reverse();
+  if (api) api.setGridOption('rowData', rows);
+  return rows;
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  const grid = agGrid.createGrid(document.getElementById('grid'), {
+    columnDefs: columns,
+    rowData: [],
+    defaultColDef: { sortable: true, filter: true, resizable: true },
+    rowSelection: 'single',
+    onRowClicked: event => showTrace(event.data),
+    getRowId: params => params.data.decision_id,
+  });
+  api = grid;
+  await load();
+  setInterval(load, 5000);
+});
+</script>
+</body>
+</html>

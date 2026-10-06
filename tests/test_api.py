@@ -421,3 +421,75 @@ def test_the_agent_cannot_run_a_sweep(client):
     paths = client.get("/openapi.json").json()["paths"]
     assert "/v1/ops/sweep" in paths
     assert not any(path.startswith("/v1/agent") and "sweep" in path for path in paths)
+
+
+# -- the dashboard ----------------------------------------------------------
+
+
+def test_the_dashboard_is_served_and_names_its_data_source(client):
+    response = client.get("/v1/ops/dashboard")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    body = response.text
+    # Pins the contract between the page and the endpoint. If one is renamed and
+    # the other is not, the dashboard silently shows nothing, and a blank grid looks
+    # like "no decisions yet" rather than like a bug.
+    assert "/v1/ops/overview" in body
+    assert "ag-grid-community@32" in body
+
+
+def test_the_dashboard_uses_only_ag_grid_community(client):
+    """Enterprise features render a watermark and log a licence error without a key.
+
+    A dashboard built on master/detail or row grouping looks broken on a judge's
+    machine and there is nothing they can do about it, so the page must not reach
+    for them.
+    """
+    body = client.get("/v1/ops/dashboard").text
+    assert "ag-grid-enterprise" not in body
+    for enterprise_only in ("masterDetail", "rowGroupPanelShow", "sideBar", "LicenseManager"):
+        assert enterprise_only not in body
+
+
+def test_the_dashboard_is_not_on_the_agent_surface(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/v1/ops/dashboard" in paths
+    assert not any(path.startswith("/v1/agent") and "dashboard" in path for path in paths)
+
+
+def test_the_overview_joins_decisions_to_their_holds(client):
+    """The join is server-side, because getting it wrong shows a rule trace next to
+    the wrong money -- the sort of mistake that makes a dashboard convincing."""
+    allowed = authorize(client)
+    assert allowed.status_code == 200
+    refused = authorize(client, items=[("SKU-GC", "gift card", Category.GIFT_CARD, "100.00", 1)])
+    assert refused.json()["outcome"] == "deny"
+
+    body = client.get("/v1/ops/overview").json()
+    rows = {row["decision_id"]: row for row in body["decisions"]}
+
+    allowed_row = rows[allowed.json()["decision_id"]]
+    assert allowed_row["state"] == "awaiting_buyer"
+    assert allowed_row["paypal_order_id"]
+
+    refused_row = rows[refused.json()["decision_id"]]
+    # Null rather than a placeholder: an em dash in a money column is a value
+    # someone eventually parses.
+    assert refused_row["captured"] is None
+    assert refused_row["authorization_id"] is None
+    assert "category_allowed" in refused_row["denied_by"]
+
+
+def test_the_overview_counts_agree_with_its_own_rows(client):
+    """Computed from the rows rather than queried separately. A headline tile that
+    disagrees with the table under it is worse than no tile."""
+    authorize(client)
+    authorize(client, items=[("SKU-GC", "gift card", Category.GIFT_CARD, "100.00", 1)])
+
+    body = client.get("/v1/ops/overview").json()
+    rows, counts = body["decisions"], body["counts"]
+    assert counts["decisions"] == len(rows)
+    assert sum(counts["by_outcome"].values()) == len(rows)
+    assert counts["refused_minor"] == sum(
+        r["amount_minor"] for r in rows if r["outcome"] != "allow"
+    )

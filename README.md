@@ -69,9 +69,10 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/webhooks.py` | **Done.** Signature-verified over the raw signed bytes, deduplicated after verification, and structurally unable to create a hold or change an amount. |
 | `gateway/sweep.py` | **Done.** Captures on confirmed delivery, releases on non-delivery, and releases rather than captures when a lapsing hold cannot be confirmed. |
 | Approval SMS | Week 3. |
-| AG Grid dashboard, Render deploy | Week 4. |
+| `gateway/static/dashboard.html` | **Done.** AG Grid Community: the ledger, live hold states, budget burn-down, and the full rule trace for any decision. |
+| Render deploy | Week 4. |
 
-313 tests pass. None of them need credentials or a network.
+318 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -334,6 +335,37 @@ and it is asserted absent from `/v1/agent/*` — an agent that could trigger a s
 itself. It also never consults the policy engine, because the policy decided when the order
 was created; re-deciding at capture time would let a basket be refused *after* the buyer had
 committed their funds.
+
+## The dashboard
+
+```
+http://localhost:8000/v1/ops/dashboard
+```
+
+The decision ledger as a grid, the budget envelopes as burn-down bars, and the complete rule
+trace for whichever decision is selected. It refreshes every five seconds, so a scene run in
+another terminal appears while you watch.
+
+Three decisions in it are worth explaining.
+
+**AG Grid Community, not Enterprise.** Master/detail rows and row grouping are the obvious
+way to show a rule trace under its decision, and both are Enterprise features: without a
+licence key they render a watermark and log an error, so the dashboard would look broken on a
+judge's machine with nothing they could do about it. The trace lives in a panel beside the
+grid instead — a constraint that improved it, since a trace is twelve lines and reads better
+with room.
+
+**Money sorts on minor units, not on text.** Sorting `amount` as a string puts `9.00` above
+`85.00`. That is the kind of bug that makes a dashboard quietly untrustworthy rather than
+visibly broken, so the column sorts and filters on the integer and formats for display.
+
+**A record that does not verify is a row, not an exception.** This was found the hard way.
+The endpoint originally called `record.verify()` and let it raise, and four records signed
+with a rotated `MANDATE_LEDGER_KEY` made the whole view 500 — so the one moment an operator
+most needs the ledger was the one moment it was unavailable. Silently skipping them would be
+worse again: a quietly shorter table is exactly how an unverifiable decision disappears. They
+now appear with **DOES NOT VERIFY** in a signature column and a count in the header, with the
+honest caveat that a rotated key and a tampered ledger look identical from there.
 
 ## How PayPal is used
 
