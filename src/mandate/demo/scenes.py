@@ -314,13 +314,41 @@ Two details worth reading rather than glossing:
             )
     else:
         outcomes = ", ".join(f"{a.label}={a.outcome}" for a in attempts)
-        finding("Not what the scene expected.", outcomes, good=False)
-        note(
-            "Reported as it happened. The most likely cause is earlier runs in this\n"
-            "window having already used the envelope, so the first attempt was refused\n"
-            "before it could become the thing the repeats duplicate. That is the engine\n"
-            "working, just not the rule this scene set out to show."
-        )
+        finding("Not the shape this scene wanted.", outcomes, good=False)
+        # Say which rule, rather than guessing. An earlier version of this branch
+        # blamed "the envelope" on the assumption that it is the usual culprit,
+        # and then printed that while the trace plainly showed duplicate_intent --
+        # a confident wrong diagnosis is worse than no diagnosis, because the
+        # reader goes and looks at the wrong rule.
+        first_blockers = [
+            e for e in attempts[0].payload.get("rule_trace") or [] if e.get("outcome") != "allow"
+        ]
+        if not first_blockers:
+            note(
+                "The first attempt was allowed and so were the repeats, which should not\n"
+                "happen inside the duplicate window. That is worth investigating."
+            )
+        else:
+            for entry in first_blockers:
+                print(f"    attempt 1 was stopped by {entry['rule_id']}: {entry['message']}")
+            ids = {e["rule_id"] for e in first_blockers}
+            if "duplicate_intent" in ids:
+                note(
+                    """
+The rule fired on the *first* attempt, because an identical basket was already
+authorized by an earlier run inside the 30-minute window. The rule is working --
+it simply has nothing left to demonstrate, since the duplicate it is objecting to
+happened before this run started.
+
+`scripts/reset_demo.sh --yes` clears the ledger, with the gateway stopped.
+"""
+                )
+            else:
+                note(
+                    "So the first attempt never became the thing the repeats would\n"
+                    "duplicate. That is still the engine working, just not the rule this\n"
+                    "scene set out to show."
+                )
     return 0
 
 
