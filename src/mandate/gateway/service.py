@@ -38,6 +38,7 @@ from ..engine.policy import Evaluation, Outcome, Policy
 from ..engine.quote import MerchantQuote, QuoteIntegrityError
 from ..ledger.records import DecisionRecord, Ledger, build
 from ..providers.paypal import Authorization, PayPalClient, PayPalError, approval_link
+from ..providers.toolkit import Toolkit
 from .approvals import Approver, Notification
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
@@ -129,6 +130,10 @@ class Gateway:
         # authorize step held back for review.
         auto_place: bool = True,
         approver: Approver | None = None,
+        #: Merchant-side reporting only. The hold lifecycle never touches it --
+        #: the toolkit does not expose authorize, void or reauthorize, which is
+        #: the whole reason this project speaks raw REST for those.
+        toolkit: Toolkit | None = None,
     ) -> None:
         self.store = store
         self.ledger = ledger
@@ -140,9 +145,10 @@ class Gateway:
         self.webhook_id = webhook_id
         self.auto_place = auto_place
         #: Pages a human for over-threshold decisions. Optional throughout: without
-        #: it the approval token and page work unchanged and an operator reads the
-        #: link off /v1/ops/holds, so a judge can run the scene with no phone.
+        #: it the approval token and page work unchanged and an operator mints the
+        #: link with issue_approval_link, so a judge can run the scene with no phone.
         self.approver = approver or Approver(None, "")
+        self.toolkit = toolkit
 
     # -- the main path ---------------------------------------------------
 
@@ -373,6 +379,61 @@ class Gateway:
             at=moment,
             capture_id=capture.capture_id,
             captured_minor=taking.minor,
+        )
+
+    async def refund(
+        self,
+        decision_id: str,
+        *,
+        amount: Money | None = None,
+        reason: str = "refunded by an operator",
+        now: datetime | None = None,
+    ) -> Hold:
+        """Give captured money back.
+
+        The only operation in this gateway that moves money *towards* the buyer,
+        and the only one that can follow a capture. It exists because capture is
+        the irreversible half: the sweep is built to void rather than capture when
+        it cannot tell, but once a capture has happened the only remaining remedy
+        is this one, and a system that can take money and not return it is not a
+        payments system.
+
+        Refunds the captured amount, not the authorized one. Those differ whenever
+        a partial capture happened, and refunding what was held rather than what
+        was taken would hand back money that was never collected -- PayPal refuses
+        it, but relying on the processor to catch our arithmetic is not a control.
+        """
+        moment = now or datetime.now(UTC)
+        hold = self.store.get(decision_id)
+        if hold.state is not HoldState.CAPTURED:
+            raise GatewayError(f"{decision_id} is {hold.state.value}, not captured")
+        if self.paypal is None or not hold.capture_id:
+            raise GatewayError("no capture to refund")
+
+        taken = hold.captured or hold.amount
+        giving = amount or taken
+        if giving > taken:
+            raise GatewayError(f"cannot refund {giving}; only {taken} was captured")
+
+        try:
+            await self.paypal.refund_capture(
+                hold.capture_id,
+                currency=giving.currency,
+                value=giving.to_paypal(),
+                note=reason[:255],
+            )
+        except PayPalError as exc:
+            # Not FAILED. The money is still captured and the hold still says so,
+            # which is true; moving it to FAILED would lose the fact that a
+            # capture succeeded and invite someone to retry the capture.
+            self.store.note(decision_id, last_error=f"refund failed: {exc}")
+            raise GatewayError(f"refund failed: {exc}") from exc
+
+        return self.store.transition(
+            decision_id,
+            HoldState.REFUNDED,
+            detail=f"{reason}; refunded {giving}",
+            at=moment,
         )
 
     async def void(

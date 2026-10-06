@@ -36,6 +36,8 @@ from ..ledger.codec import dec_quote
 from ..ledger.records import Ledger, SignatureInvalid
 from ..policies import demo_policy
 from ..providers.paypal import LIVE, SANDBOX, PayPalClient
+from ..providers.toolkit import Toolkit
+from . import disputes as dispute_api
 from .approvals import build_approver
 from .service import AuthorizationRequest, Gateway, GatewayError, WebhookRejected
 from .state import HoldState
@@ -98,6 +100,10 @@ def build_gateway() -> Gateway:
         # human-approval path behave identically; the link is read off
         # /v1/ops/holds instead of arriving by SMS.
         approver=build_approver(dict(os.environ)),
+        # Same credentials, different surface, and only ever read from.
+        toolkit=Toolkit(client_id, client_secret, sandbox=not live)
+        if client_id and client_secret
+        else None,
     )
 
 
@@ -244,6 +250,34 @@ async def place_hold(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
         return {"hold": _hold_json(await gw.place_hold(decision_id))}
     except UnknownHold:
         raise HTTPException(404, f"no decision {decision_id}") from None
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class RefundBody(BaseModel):
+    amount: str = Field(default="", max_length=32)
+    reason: str = Field(default="refunded by an operator", max_length=500)
+
+
+@ops_router.post("/holds/{decision_id}/refund")
+async def refund(decision_id: str, body: RefundBody, gw: Gateway = Depends(gateway)) -> dict:
+    """Give captured money back. Operator-only, and absent from /v1/agent/*.
+
+    An agent that could refund could also mask a mistake it made with the money,
+    which is the one thing the ledger exists to prevent.
+    """
+    try:
+        hold = gw.store.get(decision_id)
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    amount = None
+    if body.amount:
+        try:
+            amount = Money.from_paypal(body.amount, hold.amount.currency)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    try:
+        return {"hold": _hold_json(await gw.refund(decision_id, amount=amount, reason=body.reason))}
     except GatewayError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -452,7 +486,7 @@ def decisions(limit: int = 200, gw: Gateway = Depends(gateway)) -> dict:
 
 
 @ops_router.get("/overview")
-def overview(limit: int = 500, gw: Gateway = Depends(gateway)) -> dict:
+async def overview(limit: int = 500, gw: Gateway = Depends(gateway)) -> dict:
     """One request, everything the dashboard shows.
 
     Joined here rather than in the browser. The join is decision-to-hold, and
@@ -465,6 +499,11 @@ def overview(limit: int = 500, gw: Gateway = Depends(gateway)) -> dict:
     display an unverified decision is a dashboard that cannot be used as evidence.
     """
     holds = {hold.decision_id: hold for hold in gw.store.list(limit=limit * 2)}
+    # Fetched once for the whole table, never stored. A dispute's state lives at
+    # PayPal and changes without telling us, so a copy here would be a second
+    # source of truth that is wrong more often than right. `fetch` never raises:
+    # an unreachable dispute API costs the column, not the ledger.
+    disputed = await dispute_api.fetch(gw.toolkit)
     rows = []
     for record in gw.ledger:
         # A record that does not verify becomes a row that says so, rather than an
@@ -514,10 +553,15 @@ def overview(limit: int = 500, gw: Gateway = Depends(gateway)) -> dict:
                 ),
                 "approved_by": hold.approved_by if hold else None,
                 "last_error": hold.last_error if hold else None,
+                # The last column: what happened after the money moved. None means
+                # "not disputed" only when disputes.reachable is true -- see the
+                # note on that field for why the two must not read the same.
+                "dispute": disputed.for_capture(hold.capture_id if hold else None),
             }
         )
     rows = rows[-limit:]
     return {
+        "disputes": {"reachable": disputed.reachable, "detail": disputed.detail},
         "policy_id": gw.policy.policy_id,
         "budget": gw.budget(),
         "decisions": rows,

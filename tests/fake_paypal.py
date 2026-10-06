@@ -55,6 +55,7 @@ class FakePayPal:
         self.orders: dict[str, FakeOrder] = {}
         self.authorizations: dict[str, FakeAuthorization] = {}
         self.captures: dict[str, dict] = {}
+        self.refunds: dict[str, dict] = {}
         self.request_ids: list[str] = []
         self.fail_next: tuple[int, dict] | None = None
         #: What the verifier answers. Controllable because the interesting webhook
@@ -113,6 +114,8 @@ class FakePayPal:
             return self._authorize(path.split("/")[-2])
         if path.endswith("/capture") and request.method == "POST":
             return self._capture(path.split("/")[-2], body)
+        if path.endswith("/refund") and request.method == "POST":
+            return self._refund(path.split("/")[-2], body)
         if path.endswith("/void") and request.method == "POST":
             return self._void(path.split("/")[-2])
         if path.endswith("/reauthorize") and request.method == "POST":
@@ -235,6 +238,41 @@ class FakePayPal:
             "final_capture": bool(body.get("final_capture", True)),
         }
         self.captures[capture_id] = payload
+        return httpx.Response(201, json=payload)
+
+    def _refund(self, capture_id: str, body: dict) -> httpx.Response:
+        capture = self.captures.get(capture_id)
+        if capture is None:
+            return httpx.Response(404, json={"name": "RESOURCE_NOT_FOUND"})
+        asked = Decimal(body["amount"]["value"])
+        taken = Decimal(capture["amount"]["value"])
+        already = sum(
+            (Decimal(r["amount"]["value"]) for r in self.refunds.values()
+             if r["capture_id"] == capture_id),
+            Decimal("0"),
+        )
+        # PayPal refuses a refund larger than what remains of the capture. Modelled
+        # because the gateway checks it too, and a fake that accepted anything would
+        # let that check rot untested.
+        if asked + already > taken:
+            return httpx.Response(
+                422,
+                json={
+                    "name": "UNPROCESSABLE_ENTITY",
+                    "details": [{"issue": "REFUND_AMOUNT_EXCEEDED"}],
+                },
+            )
+        refund_id = self._next_id("REFUND")
+        payload = {
+            "id": refund_id,
+            "status": "COMPLETED",
+            "amount": {"currency_code": capture["amount"]["currency_code"], "value": str(asked)},
+            "capture_id": capture_id,
+        }
+        self.refunds[refund_id] = payload
+        for auth in self.authorizations.values():
+            if auth.status in {"CAPTURED", "PARTIALLY_CAPTURED"}:
+                auth.status = "REFUNDED"
         return httpx.Response(201, json=payload)
 
     def _void(self, authorization_id: str) -> httpx.Response:

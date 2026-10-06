@@ -631,3 +631,52 @@ def test_you_cannot_mint_a_link_for_a_hold_nobody_is_waiting_on(client):
 
 def test_minting_a_link_for_an_unknown_decision_is_404(client):
     assert client.post("/v1/ops/holds/dec_nope/approval-link").status_code == 404
+
+
+# -- refund over HTTP ------------------------------------------------------
+
+
+def _capture_one(client, paypal) -> dict:
+    """Walk a basket through to money actually taken, over HTTP."""
+    body = authorize(client).json()
+    paypal.approve_buyer(body["hold"]["paypal_order_id"])
+    client.post(f"/v1/ops/holds/{body['decision_id']}/place")
+    captured = client.post(f"/v1/ops/holds/{body['decision_id']}/capture", json={})
+    assert captured.json()["hold"]["state"] == "captured"
+    return body
+
+
+def test_a_refund_moves_the_hold_to_refunded(client, paypal):
+    body = _capture_one(client, paypal)
+    response = client.post(f"/v1/ops/holds/{body['decision_id']}/refund", json={})
+    assert response.status_code == 200
+    assert response.json()["hold"]["state"] == "refunded"
+
+
+def test_refunding_something_never_captured_is_409(client):
+    body = authorize(client).json()
+    response = client.post(f"/v1/ops/holds/{body['decision_id']}/refund", json={})
+    assert response.status_code == 409
+    assert "not captured" in response.json()["detail"]
+
+
+def test_refunding_an_unknown_decision_is_404(client):
+    assert client.post("/v1/ops/holds/dec_nope/refund", json={}).status_code == 404
+
+
+def test_the_refund_route_is_not_on_the_agent_surface(client):
+    body = authorize(client).json()
+    # An agent that could refund could mask a mistake it made with the money,
+    # which is the one thing the ledger exists to prevent.
+    assert (
+        client.post(f"/v1/agent/holds/{body['decision_id']}/refund", json={}).status_code == 404
+    )
+
+
+def test_the_overview_says_whether_disputes_could_be_checked(client):
+    """Empty and unreachable must never read the same."""
+    authorize(client)
+    body = client.get("/v1/ops/overview").json()
+    assert body["disputes"]["reachable"] is False
+    assert "not checked" in body["disputes"]["detail"]
+    assert all(row["dispute"] is None for row in body["decisions"])

@@ -67,14 +67,16 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `demo/hostile_proxy.py` | **Done.** A compromised tool server that tampers with a quote *before* the merchant signs it, so the signature the gateway checks is genuine. |
 | `delivery/` oracle | **Done.** A three-value contract — delivered, not yet, never, cannot tell — with a carrier adapter. An unreachable carrier is *cannot tell*, never *never*. |
 | `gateway/webhooks.py` | **Done.** Signature-verified over the raw signed bytes, deduplicated after verification, and structurally unable to create a hold or change an amount. |
+| `gateway/disputes.py` | **Done, verified live.** The ledger's last column: a capture the buyer later disputed, read through the Agent Toolkit. Never stored — a dispute's state lives at PayPal and changes without telling us. |
+| Refund path | **Done.** `POST /v1/ops/holds/{id}/refund`, operator-only. Refunds what was *captured*, not what was authorized. |
 | `gateway/sweep.py` | **Done.** Captures on confirmed delivery, releases on non-delivery, and releases rather than captures when a lapsing hold cannot be confirmed. |
 | `gateway/approvals.py`, `providers/twilio.py` | **Done.** Over-threshold decisions page a human by SMS, and the whole approval path runs without Twilio — a trial account cannot deliver the message at all, so that fallback is the demo path. |
 | `gateway/static/dashboard.html` | **Done.** AG Grid Community: the ledger, live hold states, budget burn-down, and the full rule trace for any decision. |
-| `Dockerfile`, `docker-compose.yml` | **Written, build not yet verified.** Two services from one image, non-root, healthchecked, ledger on a named volume. The image has not been built end to end: the machine it was written on ran out of disk. |
+| `Dockerfile`, `docker-compose.yml` | **Done, verified.** Two services from one image, non-root (uid 10001), healthchecked, ledger on a named volume. Built and run: both containers healthy, seeded inside the container, 11 records verified and replayed with 0 divergences. |
 | `render.yaml` | **Done.** Blueprint for both services, with the free-tier disk caveat documented rather than hidden. |
 | `scripts/seed_demo.py` | **Done.** A month of history from nothing, produced by the real engine so every seeded record still replays. |
 
-373 tests pass. None of them need credentials or a network.
+391 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -197,7 +199,7 @@ should copy into anything.
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest          # 373 tests, no credentials, no network
+.venv/bin/python -m pytest          # 391 tests, no credentials, no network
 ./scripts/bootstrap_env.sh
 ./scripts/serve.sh                  # merchant and gateway, Ctrl-C stops both
 ```
@@ -227,7 +229,7 @@ It found the bug that exercise exists to find. `pytest` collected nothing on a c
 only ever installed by hand. 373 tests passed locally and zero would have run for anyone else.
 It is pinned now.
 
-The rest, on a clone with no credentials of any kind: 373 tests pass, `bootstrap_env.sh` writes
+The rest, on a clone with no credentials of any kind: 391 tests pass, `bootstrap_env.sh` writes
 a key, both services start, `seed_demo.py` writes 11 decisions, `mandate verify` confirms all 11
 under the configured key, `mandate replay` reports 0 divergences, and the dashboard renders the
 grid, the burn-down bars and the full rule trace for the $4,000 gift-card refusal. The envelopes
@@ -493,6 +495,50 @@ Verified end to end on that path against the real PayPal sandbox: $180 of comput
 operator mints the link, the page renders `180.00` and `CloudSpend Inc`, approving creates
 order `0VK…6193P` and moves the hold to `awaiting_buyer`, and replaying the same link returns
 404.
+
+## After the money moves
+
+Two things run after a decision, and they are the only parts of this project that look
+backwards.
+
+**Refund.** `POST /v1/ops/holds/{decision_id}/refund` is the one operation that moves money
+*towards* the buyer, and the only one that can follow a capture. The sweep is built to void
+rather than capture whenever it cannot tell, precisely because capture is irreversible — but
+once a capture has happened this is the only remedy left, and a system that can take money and
+not give it back is not a payments system.
+
+It refunds what was **captured**, not what was authorized. Those differ after a partial capture,
+and refunding the held figure would hand back money that was never collected. PayPal refuses
+that, but relying on the processor to catch our arithmetic is not a control, so the gateway
+checks first. A refund that fails leaves the hold `captured` rather than `failed`: the money
+really is still captured, and saying otherwise would lose that fact and invite someone to retry
+the *capture*.
+
+Operator-only, and asserted absent from `/v1/agent/*`. An agent that could refund could mask a
+mistake it made with the money, which is the one thing the ledger exists to prevent.
+
+**Disputes.** The ledger's last column, read through the PayPal Agent Toolkit rather than raw
+REST. That split is deliberate rather than inconsistent: the toolkit does not expose authorize,
+void or reauthorize, which is why the hold lifecycle speaks REST — but it covers merchant-side
+reporting well, and this is merchant-side reporting. Using it here and not there is the honest
+division of the two.
+
+Nothing is stored. A dispute's state lives at PayPal and changes without telling us, so a copy
+in the hold table would be a second source of truth that is wrong more often than right. The
+overview joins on demand, by `disputed_transactions[].seller_transaction_id` against our
+capture id.
+
+The field that matters is `reachable`. Without it an empty result means both "nothing is
+disputed" and "the lookup failed", and those must never render the same — one is good news and
+the other is no news. So the column shows `—` when PayPal answered and `?` when it did not, and
+a failed lookup costs the column rather than the ledger: `fetch` never raises, which is the same
+lesson as the record that failed to verify and took out the entire operator view.
+
+A capture the buyer later disputed is the clearest evidence a decision which passed every rule
+was still the wrong decision. A firewall that never looks at its own outcomes cannot learn that.
+
+Verified live against the sandbox: `{"reachable": true, "detail": "0 disputed capture(s)"}` —
+the right answer for a sandbox with no disputes, and distinguishable from not having asked.
 
 ## The dashboard
 

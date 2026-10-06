@@ -159,6 +159,19 @@ const columns = [
   { headerName: 'Denied by', field: 'denied_by', flex: 1, minWidth: 180,
     valueFormatter: p => (p.value || []).join(', ') || '—' },
   { headerName: 'Rules', field: 'rules_evaluated', width: 90, type: 'numericColumn' },
+  // What happened after the money moved -- the one column that looks backwards. A
+  // capture the buyer later disputed is the clearest evidence that a decision which
+  // passed every rule was still the wrong decision.
+  //
+  // '?' rather than blank when the lookup failed, because "nothing is disputed" and
+  // "we could not ask" are opposite facts and must never render the same.
+  { headerName: 'Dispute', field: 'dispute', width: 130,
+    valueGetter: p => p.data.dispute ? p.data.dispute.status : null,
+    cellStyle: p => p.value ? { color: 'var(--deny)', fontWeight: 600 } : { color: 'var(--dim)' },
+    valueFormatter: p => p.value || (disputesReachable ? '—' : '?'),
+    tooltipValueGetter: p => p.data.dispute
+      ? `${p.data.dispute.reason || 'disputed'} · ${p.data.dispute.amount || ''} ${p.data.dispute.currency || ''}`
+      : (disputesReachable ? 'not disputed' : disputesDetail) },
   // Last column, and empty for a healthy ledger. An unverifiable record is the most
   // important thing this table can say, so it is a column rather than a tooltip.
   { headerName: 'Signature', field: 'verified', width: 120,
@@ -167,6 +180,10 @@ const columns = [
 ];
 
 let api = null;
+// Scoped here because the Dispute column's formatter needs it and AG Grid gives a
+// formatter no access to the response the rows came from.
+let disputesReachable = false;
+let disputesDetail = 'disputes were not checked';
 
 function tiles(counts, budget) {
   const o = counts.by_outcome || {};
@@ -221,6 +238,10 @@ async function load() {
     return;
   }
   const data = await response.json();
+  // Captured before the rows render, because the Dispute column's formatter reads
+  // it to decide whether an empty cell means "not disputed" or "could not ask".
+  disputesReachable = !!(data.disputes && data.disputes.reachable);
+  disputesDetail = (data.disputes && data.disputes.detail) || 'disputes were not checked';
   document.getElementById('meta').innerHTML =
     `policy <code>${data.policy_id}</code> · ${data.counts.decisions} decisions · refreshes every 5s`;
   tiles(data.counts, data.budget || {});
