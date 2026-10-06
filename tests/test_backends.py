@@ -644,3 +644,34 @@ def test_the_withdrawn_models_are_not_in_the_preference_list():
     key. Keeping them cost three wasted requests and a misleading error."""
     assert "gemini-2.5-flash" not in FREE_TIER_MODELS
     assert "gemini-2.5-flash-lite" not in FREE_TIER_MODELS
+
+
+async def test_the_backoff_is_capped_and_jittered(monkeypatch):
+    """Eight attempts must not mean forty minutes, and must not be in lockstep.
+
+    Capped because the point of more attempts is surviving a saturated free tier,
+    not waiting out a doubling schedule. Jittered because every client retrying on
+    the same schedule arrives back together and re-creates the spike it is backing
+    off from.
+    """
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "high demand"}})
+
+    with pytest.raises(GeminiUnavailable):
+        await gemini(handler, attempts=8, backoff=3.0, backoff_cap=30.0, rpm=0).complete(
+            system="s", turns=[UserTurn(text="hi")], tools=[]
+        )
+    assert len(slept) == 7
+    assert max(slept) <= 30.0 * 1.3
+    # Jitter means no two pauses at the cap are identical.
+    at_cap = [pause for pause in slept if pause > 30.0 * 0.9]
+    assert len(set(at_cap)) == len(at_cap)
+    # Eight attempts is minutes, not an afternoon.
+    assert sum(slept) < 180.0

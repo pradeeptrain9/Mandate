@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 import uuid
@@ -247,8 +248,14 @@ class GeminiBackend:
         # sees a stack trace learns nothing about the firewall. Retried here
         # rather than in the agent loop, because the loop's job is to be
         # provider-neutral and this is a property of one provider's free tier.
-        attempts: int = 4,
-        backoff: float = 4.0,
+        # Eight, from a measurement rather than a feeling. On a saturated free
+        # tier, three consecutive turns each succeeded on their *second* attempt
+        # and the fourth turn burned four in a row -- so four attempts sat right at
+        # the edge where a run dies for no reason but luck. The backoff is capped
+        # so eight attempts is about three minutes, not forty.
+        attempts: int = 8,
+        backoff: float = 3.0,
+        backoff_cap: float = 30.0,
         # The free tier allows five generateContent calls a minute per model, and
         # an agent turn is one call. A five-step basket therefore hits the limit
         # on its last step -- which is exactly what happened: four tools, then
@@ -268,6 +275,7 @@ class GeminiBackend:
         self._timeout = timeout
         self._attempts = max(1, attempts)
         self._backoff = backoff
+        self._backoff_cap = backoff_cap
         self._rpm = max(0, rpm)
         self._sent: deque[float] = deque(maxlen=max(1, self._rpm))
         self._http = httpx.AsyncClient(timeout=timeout, transport=transport)
@@ -324,7 +332,11 @@ class GeminiBackend:
                     raise GeminiUnavailable(f"Gemini request failed ({last})")
 
             if attempt < self._attempts:
-                pause = self._backoff * (2 ** (attempt - 1))
+                pause = min(self._backoff_cap, self._backoff * (2 ** (attempt - 1)))
+                # Jitter, because every client retrying a shared free tier on the
+                # same doubling schedule arrives back in lockstep and re-creates
+                # the spike it is backing off from.
+                pause *= 1.0 + random.random() * 0.3
                 if "429" in last:
                     # A spent per-minute window needs the window to pass, and
                     # four seconds does not. Google's own retryDelay is used when
