@@ -75,18 +75,24 @@ def _retry_delay(body: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-#: Preference order, best first. **A name here is not a promise.** `gemini-2.5-flash`
-#: is listed by the models endpoint, has `generateContent` in its
-#: `supportedGenerationMethods`, and answers a 404 saying it "is no longer
-#: available to new users". Metadata is not capability, which is why
-#: `discover_model()` is a convenience and never a health check.
+#: Preference order, best first. **A name here is not a promise**, and the list is
+#: shorter than it was for a measured reason.
+#:
+#: `gemini-2.5-flash` and `gemini-2.5-flash-lite` were in it. Both are listed by
+#: the models endpoint with `generateContent` among their supported methods, and
+#: both answer `404 ... is no longer available to new users`. Metadata is not
+#: capability, so they are gone: a preference list whose tail cannot be reached by
+#: any new key is not a fallback, it is three wasted requests and a misleading
+#: error message.
+#:
+#: The live ones move around. A probe at one moment had 3.8 returning 503 "high
+#: demand" while 3.7, 3.6 and 3.5 all answered, which is why `working_model()`
+#: exists and why nothing here assumes the first entry is available.
 FREE_TIER_MODELS = (
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
 )
 
 DEFAULT_MODEL = FREE_TIER_MODELS[0]
@@ -467,6 +473,50 @@ class GeminiBackend:
                     }
                 )
         return out
+
+    async def working_model(self) -> tuple[str, list[str]]:
+        """The first preferred model that actually answers, and why the others did not.
+
+        One token each, the smallest request the API accepts, asked in preference
+        order and stopped at the first success. That costs real requests, and the
+        alternative was worse: the default model has been found returning 503
+        "high demand" while three others answered, so a run that trusted the
+        default failed for a reason that had nothing to do with this project.
+
+        The chosen model is returned to the caller to *announce*, not to swap in
+        quietly. `_post` never changes model on failure: the injection scene
+        measures whether a named model resisted an instruction, and an answer that
+        might have come from a different model than the one printed would make that
+        finding worthless. Choosing up front, out loud, keeps one model for the
+        whole run.
+        """
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+            "generationConfig": {"maxOutputTokens": 1, "temperature": 0},
+        }
+        notes: list[str] = []
+        for candidate in FREE_TIER_MODELS:
+            await self._wait_for_a_slot()
+            try:
+                response = await self._http.post(
+                    f"{BASE_URL}/{candidate}:generateContent",
+                    params={"key": self.api_key},
+                    json=body,
+                )
+            except httpx.HTTPError as exc:
+                notes.append(f"{candidate}: {type(exc).__name__}")
+                continue
+            if response.status_code == 200:
+                return candidate, notes
+            detail = ""
+            try:
+                detail = ((response.json() or {}).get("error") or {}).get("message", "")
+            except ValueError:
+                detail = response.text[:120]
+            notes.append(f"{candidate}: {response.status_code} {detail[:70]}")
+        raise GeminiUnavailable(
+            "no preferred Gemini model answered generateContent. " + "; ".join(notes)
+        )
 
     async def discover_model(self) -> str:
         """The best free-tier model this key is *listed* as able to reach.

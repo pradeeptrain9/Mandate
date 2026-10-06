@@ -600,3 +600,47 @@ async def test_a_429_without_retry_info_waits_a_full_window(monkeypatch):
         system="s", turns=[UserTurn(text="hi")], tools=[]
     )
     assert slept == [62.0]
+
+
+async def test_working_model_skips_the_ones_that_do_not_answer(monkeypatch):
+    """The default has been found 503 while three others answered.
+
+    So the runner asks rather than assuming -- and the result is announced, because
+    a model chosen behind the reader's back makes the injection finding
+    unverifiable.
+    """
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        model = str(request.url.path).rsplit("/", 1)[-1].split(":")[0]
+        if model == "gemini-3.8-flash":
+            return httpx.Response(503, json={"error": {"message": "high demand"}})
+        if model == "gemini-3.7-flash":
+            return httpx.Response(404, json={"error": {"message": "no longer available"}})
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "x"}]}}]})
+
+    model, skipped = await gemini(handler, rpm=0).working_model()
+    assert model == "gemini-3.6-flash"
+    assert len(skipped) == 2
+    assert "503" in skipped[0] and "high demand" in skipped[0]
+    assert "404" in skipped[1]
+
+
+async def test_working_model_reports_every_failure_when_none_answer(monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "high demand"}})
+
+    with pytest.raises(GeminiUnavailable) as caught:
+        await gemini(handler, rpm=0).working_model()
+    message = str(caught.value)
+    for name in FREE_TIER_MODELS:
+        assert name in message
+
+
+def test_the_withdrawn_models_are_not_in_the_preference_list():
+    """Both 2.5 models are listed by the models endpoint and both 404 for a new
+    key. Keeping them cost three wasted requests and a misleading error."""
+    assert "gemini-2.5-flash" not in FREE_TIER_MODELS
+    assert "gemini-2.5-flash-lite" not in FREE_TIER_MODELS

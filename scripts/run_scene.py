@@ -121,12 +121,27 @@ async def main() -> int:
     scene = SCENES[args.scene]
 
     backend = None
+    chosen_note: list[str] = []
     if scene.uses_model:
         try:
             backend = choose(args.provider, model=args.model)
         except RuntimeError as exc:
             print(f"{RED}{exc}{RESET}", file=sys.stderr)
             return 2
+        if args.model is None and backend.provider == "gemini":
+            # The default free-tier model has been found returning 503 "high
+            # demand" while three others answered, so a run that trusted the
+            # default failed for a reason that has nothing to do with this
+            # project. One ping each, in preference order, and the winner is
+            # announced -- never swapped in later, because the injection scene
+            # measures whether *a named model* resisted an instruction.
+            try:
+                model, skipped = await backend.working_model()
+            except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                print(f"{YELLOW}could not probe for a reachable model: {exc}{RESET}", file=sys.stderr)
+            else:
+                chosen_note = skipped
+                backend.model = model
 
     if not await preflight(args.gateway, args.merchant):
         return 2
@@ -135,6 +150,8 @@ async def main() -> int:
     note(scene.expectation)
     if backend is not None:
         note(f"provider: {backend.provider} · model: {backend.model}")
+        for skipped in chosen_note:
+            note(f"skipped {skipped}")
         note(f"configured: {', '.join(configured_providers())}")
     else:
         note("no model is involved in this scene")
