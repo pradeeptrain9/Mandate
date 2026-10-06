@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 
 from mandate.engine.policy import (
@@ -24,6 +25,10 @@ def verdict(q, policy, now, ledger=EMPTY):
 
 def rule(evaluation, rule_id):
     return next(r for r in evaluation.results if r.rule_id == rule_id)
+
+
+def replace_reserved(entry: PriorAuthorization, reserved: bool) -> PriorAuthorization:
+    return dataclasses.replace(entry, reserved=reserved)
 
 
 def prior(at, amount: str, *, merchant="m_acme", fingerprint="fp", categories=()):
@@ -232,3 +237,38 @@ def test_every_rule_appears_in_the_trace_even_when_one_has_already_denied(policy
         "duplicate_intent",
         "approval_threshold",
     } <= ids
+
+
+# -- reserved vs released ---------------------------------------------------
+
+
+def test_a_voided_hold_stops_occupying_the_envelope(policy, now):
+    """The funds are demonstrably back with the buyer, so the day's allowance
+    should not still be carrying them."""
+    released = replace_reserved(prior(now - timedelta(minutes=10), "150.00"), False)
+    ledger = LedgerWindow((released,))
+    q = quote(items=[("SKU-PAPER", "Paper", Category.OFFICE_SUPPLIES, "90.00", 1)])
+    result = verdict(q, policy, now, ledger)
+    assert rule(result, "envelope:hour").facts["spent_minor"] == 0
+    assert result.outcome is Outcome.ALLOW
+
+
+def test_a_voided_hold_still_counts_towards_velocity(policy, now):
+    """A buy-then-void loop is exactly the pattern velocity exists to catch."""
+    ledger = LedgerWindow(
+        tuple(
+            replace_reserved(prior(now - timedelta(minutes=i + 1), "10.00", fingerprint=f"fp{i}"), False)
+            for i in range(5)
+        )
+    )
+    result = verdict(quote(), policy, now, ledger)
+    assert rule(result, "velocity").outcome is Outcome.DENY
+    assert rule(result, "envelope:hour").facts["spent_minor"] == 0
+
+
+def test_a_voided_hold_still_counts_as_a_duplicate(policy, now):
+    q = quote()
+    ledger = LedgerWindow(
+        (replace_reserved(prior(now - timedelta(minutes=2), "34.00", fingerprint=q.fingerprint()), False),)
+    )
+    assert rule(verdict(q, policy, now, ledger), "duplicate_intent").outcome is Outcome.HOLD_FOR_APPROVAL

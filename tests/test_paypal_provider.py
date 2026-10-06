@@ -268,3 +268,91 @@ async def test_header_casing_does_not_matter():
 def test_missing_credentials_fail_fast():
     with pytest.raises(ValueError):
         PayPalClient("", "secret")
+
+
+# -- idempotency keys identify the attempt, not just the resource ------------
+#
+# Found by the sandbox spike. Keying a capture on the authorization id alone made
+# a $20 capture and a later $26 capture collide: PayPal replayed the first
+# response, the second call returned 201, and it looked like a double capture had
+# been allowed.
+
+
+@pytest.mark.asyncio
+async def test_two_different_capture_amounts_get_different_idempotency_keys():
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth2/token":
+            return ok(TOKEN)
+        keys.append(request.headers["paypal-request-id"])
+        return ok({"id": "CAPTURE-1", "status": "COMPLETED"})
+
+    async with client(handler) as pp:
+        await pp.capture_authorization("AUTH-9", currency="USD", value="20.00")
+        await pp.capture_authorization("AUTH-9", currency="USD", value="26.00")
+    assert len(set(keys)) == 2, "a different amount must not reuse the earlier key"
+
+
+@pytest.mark.asyncio
+async def test_retrying_the_same_capture_reuses_its_key():
+    """The other half: a timeout retry must be idempotent, not a second charge."""
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth2/token":
+            return ok(TOKEN)
+        keys.append(request.headers["paypal-request-id"])
+        return ok({"id": "CAPTURE-1", "status": "COMPLETED"})
+
+    async with client(handler) as pp:
+        await pp.capture_authorization("AUTH-9", currency="USD", value="20.00")
+        await pp.capture_authorization("AUTH-9", currency="USD", value="20.00")
+    assert len(set(keys)) == 1
+
+
+@pytest.mark.asyncio
+async def test_final_capture_flag_is_part_of_the_key():
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth2/token":
+            return ok(TOKEN)
+        keys.append(request.headers["paypal-request-id"])
+        return ok({"id": "CAPTURE-1", "status": "COMPLETED"})
+
+    async with client(handler) as pp:
+        await pp.capture_authorization("AUTH-9", currency="USD", value="20.00", final_capture=True)
+        await pp.capture_authorization("AUTH-9", currency="USD", value="20.00", final_capture=False)
+    assert len(set(keys)) == 2
+
+
+@pytest.mark.asyncio
+async def test_partial_refunds_do_not_collide():
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth2/token":
+            return ok(TOKEN)
+        keys.append(request.headers["paypal-request-id"])
+        return ok({"id": "REFUND-1", "status": "COMPLETED"})
+
+    async with client(handler) as pp:
+        await pp.refund_capture("CAPTURE-1", currency="USD", value="5.00")
+        await pp.refund_capture("CAPTURE-1", currency="USD", value="15.00")
+    assert len(set(keys)) == 2
+
+
+@pytest.mark.asyncio
+async def test_idempotency_keys_fit_paypals_header_limit():
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth2/token":
+            return ok(TOKEN)
+        keys.append(request.headers["paypal-request-id"])
+        return ok({"id": "CAPTURE-1", "status": "COMPLETED"})
+
+    async with client(handler) as pp:
+        await pp.capture_authorization("A" * 300, currency="USD", value="20.00")
+    assert len(keys[0]) <= 108

@@ -230,6 +230,7 @@ def enc_ledger_window(window: LedgerWindow) -> list[dict[str, Any]]:
             "amount": enc_money(e.amount),
             "fingerprint": e.fingerprint,
             "categories": sorted(c.value for c in e.categories),
+            "reserved": e.reserved,
         }
         for e in window.entries
     ]
@@ -244,6 +245,7 @@ def dec_ledger_window(raw: list[dict[str, Any]]) -> LedgerWindow:
                 amount=dec_money(e["amount"]),
                 fingerprint=e["fingerprint"],
                 categories=frozenset(Category(c) for c in e["categories"]),
+                reserved=bool(e["reserved"]),
             )
             for e in raw
         )

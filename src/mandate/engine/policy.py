@@ -125,6 +125,16 @@ class PriorAuthorization:
     consumed no budget and must not count against the envelope, or a single
     attack that trips every rule would also exhaust the day's allowance and deny
     the legitimate purchase behind it.
+
+    `reserved` distinguishes money that is still committed from money that came
+    back. A hold that was voided or left to expire no longer occupies the
+    envelope -- the funds are demonstrably back with the buyer, and continuing to
+    count them would let one cancelled order shrink the day's allowance for no
+    reason. It does still count towards the velocity limit, because the thing
+    velocity measures is how often the agent is reaching for the card, and a
+    buy-then-void loop is exactly the pattern worth rate-limiting. So the two
+    rules read this list differently and deliberately: envelopes sum the reserved
+    entries, velocity counts all of them.
     """
 
     at: datetime
@@ -132,6 +142,7 @@ class PriorAuthorization:
     amount: Money
     fingerprint: str
     categories: frozenset[Category]
+    reserved: bool = True
 
 
 @dataclass(frozen=True)
@@ -332,7 +343,7 @@ def _envelopes(
         prior = [
             e.amount
             for e in ledger.since(now - envelope.duration)
-            if e.amount.currency == envelope.cap.currency
+            if e.reserved and e.amount.currency == envelope.cap.currency
         ]
         spent = total(prior, envelope.cap.currency)
         projected = spent + request.amount

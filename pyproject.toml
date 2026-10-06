@@ -8,6 +8,9 @@ dependencies = [
   "httpx>=0.27",
   "pydantic>=2.7",
   "fastapi>=0.115",
+  # The human approval page posts a plain HTML form, which Starlette can only
+  # parse with this installed. Not optional: the approval flow is the form.
+  "python-multipart>=0.0.9",
   "uvicorn[standard]>=0.30",
   "anthropic>=0.70",
   "python-dotenv>=1.0",

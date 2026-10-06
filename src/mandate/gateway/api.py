@@ -1,0 +1,427 @@
+"""The gateway over HTTP.
+
+A thin adapter. Every route does three things: parse, call one method on
+`Gateway`, shape the response. No policy logic lives here, because the MCP
+adapter has to behave identically and the only way to be sure is to leave them
+nothing to disagree about.
+
+Two audiences, deliberately separated by path prefix:
+
+  * `/v1/agent/*` -- what an agent may call. It can request money, read its own
+    budget, and look up a decision. It cannot capture, void, approve, or move a
+    hold. An agent that could capture its own authorization would make the hold
+    decorative.
+  * `/v1/ops/*` -- what an operator may call. Capture, void, and the ledger.
+
+That split is the API surface version of the same argument the type system makes
+elsewhere: the capability an attacker would want is not merely guarded, it is
+absent from the interface they can reach.
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+
+from ..engine.money import Money
+from ..engine.policy import Outcome
+from ..ledger.codec import dec_quote
+from ..ledger.records import Ledger
+from ..policies import demo_policy
+from ..providers.paypal import LIVE, SANDBOX, PayPalClient
+from .service import AuthorizationRequest, Gateway, GatewayError
+from .state import HoldState
+from .store import Hold, Store, UnknownHold
+
+agent_router = APIRouter(prefix="/v1/agent", tags=["agent"])
+ops_router = APIRouter(prefix="/v1/ops", tags=["operator"])
+buyer_router = APIRouter(tags=["buyer"])
+
+
+# -- wiring -----------------------------------------------------------------
+
+
+def build_gateway() -> Gateway:
+    ledger_key = os.environ.get("MANDATE_LEDGER_KEY", "")
+    merchant_secret = os.environ.get("MANDATE_MERCHANT_SECRET", "")
+    if not ledger_key or not merchant_secret:
+        raise RuntimeError(
+            "MANDATE_LEDGER_KEY and MANDATE_MERCHANT_SECRET are both required; "
+            "see .env.example"
+        )
+    client_id = os.environ.get("PAYPAL_CLIENT_ID", "")
+    client_secret = os.environ.get("PAYPAL_CLIENT_SECRET", "")
+    live = os.environ.get("PAYPAL_ENV", "sandbox").lower() == "live"
+    paypal = (
+        PayPalClient(client_id, client_secret, base_url=LIVE if live else SANDBOX)
+        if client_id and client_secret
+        else None
+    )
+    var = Path(os.environ.get("MANDATE_VAR_DIR", "var"))
+    return Gateway(
+        store=Store(var / "state.db"),
+        ledger=Ledger(var / "decisions.jsonl", ledger_key.encode("utf-8")),
+        policy=demo_policy(),
+        merchant_secret=merchant_secret.encode("utf-8"),
+        paypal=paypal,
+        public_url=os.environ.get("MANDATE_PUBLIC_URL", "http://localhost:8000"),
+    )
+
+
+def gateway(request: Request) -> Gateway:
+    return request.app.state.gateway
+
+
+# -- shapes -----------------------------------------------------------------
+
+
+class AuthorizeBody(BaseModel):
+    """A signed quote, plus whatever the agent wants to say about it.
+
+    `reason` is recorded and shown to humans. It is never passed to the engine --
+    it is the single most likely place for an injected instruction to arrive, and
+    `evaluate()` has no parameter that could receive it.
+    """
+
+    quote: dict
+    reason: str = Field(default="", max_length=2000)
+    agent_id: str = Field(default="unknown-agent", max_length=120)
+
+
+class CaptureBody(BaseModel):
+    amount: str | None = Field(default=None, description="decimal string; defaults to the full hold")
+    reason: str = Field(default="delivery confirmed", max_length=500)
+
+
+class VoidBody(BaseModel):
+    reason: str = Field(default="released by operator", max_length=500)
+
+
+def _hold_json(hold: Hold) -> dict:
+    return {
+        "decision_id": hold.decision_id,
+        "state": hold.state.value,
+        "merchant_id": hold.merchant_id,
+        "merchant_name": hold.merchant_name,
+        "amount": hold.amount.to_paypal(),
+        "currency": hold.amount.currency,
+        "captured": hold.captured.to_paypal() if hold.captured else None,
+        "engine_outcome": hold.engine_outcome,
+        "paypal_order_id": hold.paypal_order_id,
+        "authorization_id": hold.authorization_id,
+        "authorization_expires_at": (
+            hold.authorization_expires_at.isoformat() if hold.authorization_expires_at else None
+        ),
+        "approved_by": hold.approved_by,
+        "requested_at": hold.requested_at.isoformat(),
+        "updated_at": hold.updated_at.isoformat(),
+        "last_error": hold.last_error,
+    }
+
+
+def _trace_json(evaluation) -> list[dict]:
+    return [
+        {
+            "rule_id": r.rule_id,
+            "outcome": r.outcome.value,
+            "message": r.message,
+            "applicable": r.applicable,
+            "facts": r.facts,
+        }
+        for r in evaluation.results
+    ]
+
+
+# -- agent surface ----------------------------------------------------------
+
+
+@agent_router.post("/authorizations")
+async def request_authorization(body: AuthorizeBody, gw: Gateway = Depends(gateway)) -> dict:
+    """Ask for money. The answer is a decision, not a payment."""
+    try:
+        quote = dec_quote(body.quote)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, f"malformed quote: {exc}") from exc
+
+    try:
+        result = await gw.request_authorization(
+            AuthorizationRequest(quote=quote, reason=body.reason, agent_id=body.agent_id)
+        )
+    except GatewayError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    payload = {
+        "decision_id": result.decision_id,
+        "outcome": result.outcome.value,
+        "state": result.state.value,
+        "refused_by": list(result.evaluation.reason_ids),
+        "explanation": result.explain(),
+        "rule_trace": _trace_json(result.evaluation),
+        "hold": _hold_json(result.hold),
+    }
+    if result.outcome is Outcome.ALLOW:
+        # Where the buyer approves. Deliberately returned to the agent: it is
+        # PayPal's own URL and the agent needs it to tell the human what to do.
+        payload["buyer_approval_url"] = result.approval_url
+    if result.outcome is Outcome.HOLD_FOR_APPROVAL:
+        # The token itself is not returned to the agent. It goes out by SMS to
+        # the approver; handing it back here would let the agent approve itself.
+        payload["awaiting"] = "a human has been asked to approve this"
+    return payload
+
+
+@agent_router.get("/budget")
+def budget(gw: Gateway = Depends(gateway)) -> dict:
+    """What is left, per rolling window. Safe for an agent to read: it reports
+    the policy's own figures and nothing an agent could not infer by trying."""
+    return gw.budget()
+
+
+@agent_router.get("/authorizations/{decision_id}")
+def get_decision(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
+    try:
+        hold = gw.store.get(decision_id)
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    return {"hold": _hold_json(hold), "events": gw.store.events(decision_id)}
+
+
+# -- operator surface -------------------------------------------------------
+
+
+@ops_router.get("/holds")
+def list_holds(state: str | None = None, gw: Gateway = Depends(gateway)) -> dict:
+    states = None
+    if state:
+        try:
+            states = frozenset({HoldState(state)})
+        except ValueError:
+            raise HTTPException(400, f"unknown state {state!r}") from None
+    return {"holds": [_hold_json(h) for h in gw.store.list(states=states)]}
+
+
+@ops_router.post("/holds/{decision_id}/place")
+async def place_hold(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
+    """Authorize an order the buyer has approved. Funds reserved, not taken."""
+    try:
+        return {"hold": _hold_json(await gw.place_hold(decision_id))}
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@ops_router.post("/holds/{decision_id}/capture")
+async def capture(decision_id: str, body: CaptureBody, gw: Gateway = Depends(gateway)) -> dict:
+    try:
+        hold = gw.store.get(decision_id)
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    amount = None
+    if body.amount:
+        try:
+            amount = Money.from_paypal(body.amount, hold.amount.currency)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    try:
+        return {"hold": _hold_json(await gw.capture(decision_id, amount=amount, reason=body.reason))}
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@ops_router.post("/holds/{decision_id}/void")
+async def void(decision_id: str, body: VoidBody, gw: Gateway = Depends(gateway)) -> dict:
+    try:
+        return {"hold": _hold_json(await gw.void(decision_id, reason=body.reason))}
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@ops_router.get("/decisions")
+def decisions(limit: int = 200, gw: Gateway = Depends(gateway)) -> dict:
+    """The ledger, newest last, with full rule traces. Feeds the dashboard."""
+    out = []
+    for record in gw.ledger:
+        record.verify(gw.ledger.key)
+        out.append(
+            {
+                "decision_id": record.decision_id,
+                "evaluated_at": record.evaluated_at.isoformat(),
+                "merchant_id": record.quote.merchant_id,
+                "merchant_name": record.quote.merchant_name,
+                "amount": record.quote.declared_total.to_paypal(),
+                "currency": record.quote.currency,
+                "outcome": record.evaluation.outcome.value,
+                "refused_by": list(record.evaluation.reason_ids),
+                "rule_trace": _trace_json(record.evaluation),
+                "policy_id": record.policy.policy_id,
+            }
+        )
+    return {"decisions": out[-limit:]}
+
+
+@ops_router.post("/decisions/replay")
+def replay(gw: Gateway = Depends(gateway)) -> dict:
+    """Re-decide every stored record and report divergences.
+
+    Exposed as an endpoint rather than only a CLI command so the dashboard can
+    show, live, that the ledger still reproduces. A green count here is a
+    stronger claim than a README paragraph.
+    """
+    checked, failures = 0, []
+    for record in gw.ledger:
+        checked += 1
+        try:
+            record.verify(gw.ledger.key)
+            record.assert_replays()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            failures.append({"decision_id": record.decision_id, "error": str(exc)})
+    return {"checked": checked, "divergences": failures, "ok": not failures}
+
+
+# -- the human in the loop --------------------------------------------------
+
+_APPROVAL_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Approve payment &middot; Mandate</title>
+<style>
+:root{{color-scheme:light dark}}
+body{{font:16px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:1.5rem;
+  max-width:28rem;margin-inline:auto}}
+.card{{border:1px solid color-mix(in srgb,currentColor 18%,transparent);
+  border-radius:14px;padding:1.25rem;margin-bottom:1rem}}
+.amount{{font-size:2.25rem;font-weight:650;letter-spacing:-.02em;margin:.25rem 0}}
+.muted{{opacity:.65;font-size:.9rem}}
+ul{{padding-left:1.1rem;margin:.5rem 0}}
+form{{display:flex;gap:.75rem;margin-top:1.25rem}}
+button{{flex:1;padding:.85rem;font-size:1rem;font-weight:600;border-radius:10px;
+  border:1px solid transparent;cursor:pointer}}
+.yes{{background:#1a7f37;color:#fff}}
+.no{{background:transparent;border-color:color-mix(in srgb,currentColor 30%,transparent);
+  color:inherit}}
+</style></head><body>
+<p class="muted">Mandate &middot; an agent is asking to spend</p>
+<div class="card">
+  <p class="muted">{merchant_name}</p>
+  <p class="amount">{amount} {currency}</p>
+  <p class="muted">requested by agent &middot; {requested_at}</p>
+</div>
+<div class="card">
+  <strong>Why you are being asked</strong>
+  <ul>{reasons}</ul>
+</div>
+<form method="post" action="/approve/{token}">
+  <button class="no" name="verdict" value="decline">Decline</button>
+  <button class="yes" name="verdict" value="approve">Approve</button>
+</form>
+<p class="muted">This link works once and expires shortly.</p>
+</body></html>"""
+
+
+@buyer_router.get("/approve/{token}", response_class=HTMLResponse)
+def approval_page(token: str, gw: Gateway = Depends(gateway)) -> str:
+    """Render what is being asked.
+
+    The token is not consumed here -- only a POST decides. A GET that burned the
+    token would mean a link preview or an over-eager mail scanner could silently
+    destroy an approval request.
+    """
+    hold = _peek(gw, token)
+    reasons = "".join(f"<li>{_escape(r)}</li>" for r in _reasons_for(gw, hold.decision_id))
+    return _APPROVAL_PAGE.format(
+        merchant_name=_escape(hold.merchant_name),
+        amount=hold.amount.to_paypal(),
+        currency=hold.amount.currency,
+        requested_at=hold.requested_at.strftime("%d %b %Y, %H:%M UTC"),
+        reasons=reasons or "<li>over the unattended spending threshold</li>",
+        token=_escape(token),
+    )
+
+
+@buyer_router.post("/approve/{token}", response_class=HTMLResponse)
+async def decide(token: str, request: Request, gw: Gateway = Depends(gateway)) -> str:
+    form = await request.form()
+    verdict = str(form.get("verdict", ""))
+    approver = request.headers.get("x-approver", "approval link")
+    try:
+        if verdict == "approve":
+            result = await gw.approve(token, approver=approver)
+            return _done("Approved", f"Order created. Decision {result.decision_id}.")
+        if verdict == "decline":
+            hold = gw.decline(token, approver=approver)
+            return _done("Declined", f"Nothing was charged. Decision {hold.decision_id}.")
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    raise HTTPException(400, "verdict must be approve or decline")
+
+
+def _done(title: str, detail: str) -> str:
+    return (
+        "<!doctype html><html lang=en><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>{title} &middot; Mandate</title>"
+        "<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:3rem 1.5rem;"
+        "max-width:28rem;margin-inline:auto;text-align:center}"
+        "h1{font-size:1.5rem}p{opacity:.7}</style></head><body>"
+        f"<h1>{title}</h1><p>{_escape(detail)}</p></body></html>"
+    )
+
+
+def _peek(gw: Gateway, token: str) -> Hold:
+    row = gw.store.peek_approval_token(token)
+    if row is None:
+        raise HTTPException(404, "this approval link is not valid")
+    expires = row["approval_token_expires_at"]
+    if not expires or datetime.fromisoformat(expires) < datetime.now(timezone.utc):
+        raise HTTPException(410, "this approval link has expired")
+    return gw.store.get(row["decision_id"])
+
+
+def _reasons_for(gw: Gateway, decision_id: str) -> list[str]:
+    for record in gw.ledger:
+        if record.decision_id == decision_id:
+            return [r.message for r in record.evaluation.refusals]
+    return []
+
+
+def _escape(value: str) -> str:
+    import html
+
+    return html.escape(value, quote=True)
+
+
+# -- app --------------------------------------------------------------------
+
+
+def create_app(gw: Gateway | None = None) -> FastAPI:
+    app = FastAPI(
+        title="Mandate gateway",
+        version="0.1.0",
+        description=(
+            "A spend firewall for AI agents. Agents request money on /v1/agent; "
+            "only operators can capture or void. The policy engine that decides is "
+            "pure and never reads prose."
+        ),
+    )
+    app.state.gateway = gw or build_gateway()
+    app.include_router(agent_router)
+    app.include_router(ops_router)
+    app.include_router(buyer_router)
+
+    @app.get("/health", tags=["ops"])
+    def health() -> dict:
+        return {
+            "ok": True,
+            "policy": app.state.gateway.policy.policy_id,
+            "paypal": "configured" if app.state.gateway.paypal else "absent",
+        }
+
+    return app

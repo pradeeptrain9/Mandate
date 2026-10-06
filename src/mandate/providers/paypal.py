@@ -15,10 +15,20 @@ is valid for 29 days with reauthorization available after day 3.
 
 Every state-changing call carries a `PayPal-Request-Id`. Retrying a create-order
 or a capture without one is how a network timeout turns into two charges.
+
+The key has to identify the *attempt*, not just the resource. An early version of
+this file keyed captures on the authorization id alone, which made a $20 capture
+and a later $26 capture collide: PayPal correctly replayed the first response,
+the second call came back 201, and it looked for all the world like a double
+capture had been permitted. The sandbox spike caught it. Capture and refund keys
+now include the amount and finality, so retrying the same attempt is idempotent
+while a genuinely different attempt is a different request -- and PayPal's real
+refusal surfaces instead of being masked by a replay.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -274,7 +284,8 @@ class PayPalClient:
                 "amount": {"currency_code": currency, "value": value},
                 "final_capture": final_capture,
             },
-            request_id=request_id or f"mandate-capture-{authorization_id}",
+            request_id=request_id
+            or _attempt_key("capture", authorization_id, currency, value, final_capture),
         )
         amount = body.get("amount") or {}
         return Capture(
@@ -311,7 +322,13 @@ class PayPalClient:
         return _authorization_from_payment(body)
 
     async def refund_capture(
-        self, capture_id: str, *, currency: str, value: str, note: str = ""
+        self,
+        capture_id: str,
+        *,
+        currency: str,
+        value: str,
+        note: str = "",
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"amount": {"currency_code": currency, "value": value}}
         if note:
@@ -321,7 +338,7 @@ class PayPalClient:
             f"/v2/payments/captures/{capture_id}/refund",
             operation="refund capture",
             json_body=payload,
-            request_id=f"mandate-refund-{capture_id}",
+            request_id=request_id or _attempt_key("refund", capture_id, currency, value),
         )
 
     # -- webhooks --------------------------------------------------------
@@ -424,6 +441,19 @@ def approval_link(order: dict[str, Any]) -> str | None:
             if link.get("rel") == rel:
                 return str(link.get("href"))
     return None
+
+
+def _attempt_key(operation: str, resource_id: str, *parts: object) -> str:
+    """An idempotency key for one specific attempt.
+
+    Includes everything that distinguishes this attempt from another against the
+    same resource, so a retry is a retry and a different amount is a different
+    request. PayPal caps the header at 108 characters, so the tail is hashed
+    rather than concatenated.
+    """
+    detail = "|".join(str(p) for p in parts)
+    digest = hashlib.sha256(f"{resource_id}|{detail}".encode("utf-8")).hexdigest()[:24]
+    return f"mandate-{operation}-{digest}"
 
 
 def new_request_id(prefix: str = "mandate") -> str:

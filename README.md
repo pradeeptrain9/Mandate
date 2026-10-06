@@ -51,14 +51,42 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `ledger/records.py` | **Done.** HMAC-signed, append-only, and **replayable** — `assert_replays()` re-runs stored inputs through the live engine and fails on any divergence. |
 | `providers/paypal.py` | **Done, offline-tested.** authorize / capture / void / reauthorize / refund, idempotency keys, 401 refresh-and-retry, and webhook verification that splices the raw signed bytes rather than re-serialising them. |
 | `cli.py` | **Done.** `list`, `show`, `verify`, `replay`. |
-| Week 0 sandbox spike | **Script written** (`scripts/spike.py`), awaiting sandbox credentials. |
-| Gateway REST API | Not started (week 2). |
-| MCP server surface | Not started (week 2). |
-| Buying agent + merchant stub | Not started (week 2). |
-| Delivery oracle, webhooks, expiry job, SMS approval | Not started (week 3). |
-| AG Grid dashboard, Render deploy | Not started (week 4). |
+| Week 0 sandbox spike | **Run against the real sandbox. Passed on the things that matter** -- see below. |
+| `merchant/` stub | **Done.** Signed quotes, catalog and product pages over HTTP, one description carrying a prompt injection, and a carrier stub that never ships for scene 3. |
+| `gateway/state.py` | **Done.** 11-state machine; illegal transitions raise rather than being tolerated. |
+| `gateway/store.py` | **Done.** SQLite, hand-written SQL, every state change recorded in the same transaction. Thread-safe. |
+| `gateway/service.py` | **Done.** The one code path: verify, project, decide, record, *then* call PayPal. |
+| `gateway/api.py` | **Done.** Split agent / operator surfaces, plus the human approval page. |
+| MCP server surface | Next. |
+| Buying agent | Next. |
+| Delivery oracle, webhooks, expiry job, approval SMS | Week 3. |
+| AG Grid dashboard, Render deploy | Week 4. |
 
-77 tests pass. None of them need credentials or a network.
+155 tests pass. None of them need credentials or a network.
+
+### What the sandbox spike established
+
+Run on 2026-10-06 against a real sandbox merchant and a US sandbox buyer:
+
+- A `intent=AUTHORIZE` order was created, approved by the buyer, and authorized.
+  **$46.00 held, created `08:31:17`, expiring `2026-11-04T08:31:17` -- exactly 29
+  days, per PayPal's own figure** rather than the documented one.
+- A **partial capture** took $20.00 of the $46.00 hold and closed it.
+- A genuinely new second capture is refused.
+
+It also found a real bug, which is what it was for. The provider keyed capture
+idempotency on the authorization id alone, so a $20 capture and a later $26
+capture collided: PayPal correctly replayed the first response, the second call
+returned 201, and the script reported a double capture that had not happened.
+Idempotency keys now cover the amount and finality, so a retry stays idempotent
+while a different attempt gets PayPal's real refusal. Five tests pin it.
+
+One thing is still open and is **not** on the critical path: the remote MCP
+server at `mcp.sandbox.paypal.com` did not answer a cold `tools/list`. The probe
+now performs a proper streamable-HTTP `initialize` handshake against its own
+token endpoint. That server is for merchant-side work -- invoices, disputes,
+tracking, reporting -- and never for the hold lifecycle, so the fallbacks (local
+MCP server, or the `paypal-agent-toolkit` package) change nothing structural.
 
 ## Quickstart
 

@@ -21,6 +21,13 @@ reaches APPROVED.
     PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=... python scripts/spike.py
     python scripts/spike.py --void       # release instead of capturing
     python scripts/spike.py --mcp-only   # just step 4
+
+If PayPal says "this seller doesn't accept payments in your currency", the
+sandbox business account cannot receive the order's currency -- sandbox accounts
+are created per country and an Indian business account cannot take USD. Either
+create US sandbox accounts, or run the spike in the accounts' own currency:
+
+    python scripts/spike.py --currency INR
 """
 
 from __future__ import annotations
@@ -35,15 +42,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import httpx  # noqa: E402
 
+from mandate.engine.money import MINOR_UNITS, Money  # noqa: E402
 from mandate.providers.paypal import (  # noqa: E402
     SANDBOX,
     PayPalClient,
     PayPalError,
     approval_link,
+    new_request_id,
 )
-
-MCP_SANDBOX = "https://mcp.sandbox.paypal.com/mcp"
-
 
 def say(step: str, detail: str = "") -> None:
     print(f"\n\033[1m{step}\033[0m{(' ' + detail) if detail else ''}", flush=True)
@@ -63,22 +69,29 @@ async def step_token(pp: PayPalClient) -> None:
     ok(f"token acquired, {len(token)} chars, prefix {token[:6]}...")
 
 
-async def step_hold(pp: PayPalClient, *, void_instead: bool) -> None:
-    say("2. create an AUTHORIZE order")
+async def step_hold(pp: PayPalClient, *, void_instead: bool, currency: str) -> None:
+    # The basket, priced in whatever currency the sandbox accounts can handle.
+    # Amounts are scaled so a zero-decimal currency like JPY stays whole.
+    paper = Money.from_paypal("850" if currency == "JPY" else "8.50", currency)
+    stapler = Money.from_paypal("1200" if currency == "JPY" else "12.00", currency)
+    basket = paper * 4 + stapler
+    part = Money.from_paypal("2000" if currency == "JPY" else "20.00", currency)
+
+    say("2. create an AUTHORIZE order", f"{basket} ({currency})")
     order = await pp.create_authorization_order(
-        currency="USD",
-        value="46.00",
+        currency=currency,
+        value=basket.to_paypal(),
         items=[
             {
                 "name": "A4 paper, 500 sheets",
                 "quantity": "4",
-                "unit_amount": {"currency_code": "USD", "value": "8.50"},
+                "unit_amount": {"currency_code": currency, "value": paper.to_paypal()},
                 "category": "PHYSICAL_GOODS",
             },
             {
                 "name": "Stapler",
                 "quantity": "1",
-                "unit_amount": {"currency_code": "USD", "value": "12.00"},
+                "unit_amount": {"currency_code": currency, "value": stapler.to_paypal()},
                 "category": "PHYSICAL_GOODS",
             },
         ],
@@ -136,70 +149,180 @@ async def step_hold(pp: PayPalClient, *, void_instead: bool) -> None:
 
     say("4. partial capture, remainder released")
     capture = await pp.capture_authorization(
-        auth.authorization_id, currency="USD", value="20.00", final_capture=True
+        auth.authorization_id, currency=currency, value=part.to_paypal(), final_capture=True
     )
-    ok(f"capture {capture.capture_id}, status {capture.status}, took {capture.amount_value} USD")
+    ok(f"capture {capture.capture_id}, status {capture.status}, took {capture.amount_value} {currency}")
     after = await pp.get_authorization(auth.authorization_id)
     ok(f"authorization status now {after.status}")
 
     say("   capturing again must fail")
+    # An explicit, unique request id. The first version of this check reused the
+    # provider's default key, so PayPal replayed the original 201 and the script
+    # reported a double capture that had not happened. The real question is
+    # whether PayPal refuses a genuinely NEW attempt.
     try:
         await pp.capture_authorization(
-            auth.authorization_id, currency="USD", value="26.00", final_capture=True
+            auth.authorization_id,
+            currency=currency,
+            value=(basket - part).to_paypal(),
+            final_capture=True,
+            request_id=new_request_id("spike-second"),
         )
         bad("a second capture succeeded -- final_capture does not close the hold")
     except PayPalError as exc:
         ok(f"refused as expected: {exc.issues or exc.status}")
 
+    say("   and retrying the FIRST capture is still idempotent")
+    replay = await pp.capture_authorization(
+        auth.authorization_id, currency=currency, value=part.to_paypal(), final_capture=True
+    )
+    if replay.capture_id == capture.capture_id:
+        ok(f"same capture id returned ({replay.capture_id}); retry is safe")
+    else:
+        bad(f"retry produced a NEW capture {replay.capture_id} -- idempotency is broken")
+
+
+MCP_BASE = "https://mcp.sandbox.paypal.com"
+MCP_PATHS = ("/mcp", "/sse", "/")
+PROTOCOL = "2025-06-18"
+TOOLS_WE_CARE_ABOUT = (
+    "create_invoice",
+    "list_disputes",
+    "list_transactions",
+    "create_shipment_tracking",
+    "get_merchant_insights",
+)
+
+
+async def _mcp_token(http: httpx.AsyncClient, client_id: str, secret: str) -> str | None:
+    """Get a token for the MCP server, which has its own endpoint.
+
+    The first version of this probe reused the REST token from api-m.sandbox,
+    which is a different audience. The server advertises its own token endpoint in
+    OAuth metadata, so ask that first and fall back to REST only if it refuses.
+    """
+    attempts = (
+        ("mcp /token", MCP_BASE + "/token"),
+        ("rest oauth2", SANDBOX + "/v1/oauth2/token"),
+    )
+    for label, url in attempts:
+        try:
+            response = await http.post(
+                url, auth=(client_id, secret), data={"grant_type": "client_credentials"}
+            )
+        except httpx.HTTPError as exc:
+            print("    " + label + ": " + type(exc).__name__, flush=True)
+            continue
+        if response.status_code == 200 and "access_token" in response.text:
+            ok("token from " + label)
+            return response.json()["access_token"]
+        print("    " + label + ": " + str(response.status_code) + " " + response.text[:120], flush=True)
+    return None
+
 
 async def step_mcp() -> None:
-    say("5. remote MCP server", MCP_SANDBOX)
+    say("5. remote MCP server", MCP_BASE)
     client_id = os.environ.get("PAYPAL_CLIENT_ID", "")
     secret = os.environ.get("PAYPAL_CLIENT_SECRET", "")
-    async with httpx.AsyncClient(timeout=30.0) as http:
-        discovery = await http.get(
-            "https://mcp.sandbox.paypal.com/.well-known/oauth-authorization-server"
-        )
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
+        discovery = await http.get(MCP_BASE + "/.well-known/oauth-authorization-server")
         if discovery.status_code == 200:
             meta = discovery.json()
-            ok(f"OAuth metadata: token endpoint {meta.get('token_endpoint')}")
+            ok("OAuth metadata: token endpoint " + str(meta.get("token_endpoint")))
+            print("    grant types: " + str(meta.get("grant_types_supported")), flush=True)
         else:
-            bad(f"no OAuth metadata ({discovery.status_code}); check the quickstart for the flow")
+            bad("no OAuth metadata (" + str(discovery.status_code) + ")")
 
-        # The MCP server accepts the same client credentials as the REST API.
-        token_response = await http.post(
-            f"{SANDBOX}/v1/oauth2/token",
-            auth=(client_id, secret),
-            data={"grant_type": "client_credentials"},
-        )
-        token = token_response.json().get("access_token", "")
-        probe = await http.post(
-            MCP_SANDBOX,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-        )
-        if probe.status_code >= 300:
-            bad(f"tools/list returned {probe.status_code}: {probe.text[:300]}")
-            print(
-                "  If this is a 401, the remote server wants the full OAuth 2.1 dance\n"
-                "  rather than a client-credentials bearer. Fall back to the local MCP\n"
-                "  server or the Python agent toolkit; neither changes the architecture.",
-                flush=True,
-            )
+        token = await _mcp_token(http, client_id, secret)
+        if not token:
+            bad("no usable token for the MCP server")
+            _mcp_verdict()
             return
-        body = probe.text
-        ok(f"tools/list answered, {len(body)} bytes")
-        for name in ("create_order", "list_disputes", "create_invoice", "list_transactions"):
-            print(f"    {'found' if name in body else 'absent'}: {name}", flush=True)
+
+        for path in MCP_PATHS:
+            url = MCP_BASE + path
+            headers = {
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+                # Streamable HTTP wants BOTH, or a compliant server answers 406.
+                "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": PROTOCOL,
+            }
+            # A streamable-HTTP server expects `initialize` first and replies with
+            # an Mcp-Session-Id that later calls must echo. Sending tools/list
+            # cold -- which the first version of this probe did -- is not a fair
+            # test, and a 404 there says nothing about whether the server works.
+            init = await http.post(
+                url,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": PROTOCOL,
+                        "capabilities": {},
+                        "clientInfo": {"name": "mandate-spike", "version": "0.1.0"},
+                    },
+                },
+            )
+            if init.status_code >= 300:
+                print(
+                    "    " + path + ": initialize -> " + str(init.status_code) + " " + init.text[:140],
+                    flush=True,
+                )
+                continue
+            ok(path + ": initialize accepted")
+            session = init.headers.get("mcp-session-id")
+            if session:
+                headers["Mcp-Session-Id"] = session
+                ok("session " + session[:16] + "...")
+            await http.post(
+                url, headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+            )
+            listed = await http.post(
+                url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+            )
+            if listed.status_code >= 300:
+                print(
+                    "    " + path + ": tools/list -> " + str(listed.status_code) + " " + listed.text[:200],
+                    flush=True,
+                )
+                continue
+            body = listed.text
+            ok(path + ": tools/list answered, " + str(len(body)) + " bytes")
+            for name in TOOLS_WE_CARE_ABOUT:
+                mark = "found " if name in body else "absent"
+                print("    " + mark + ": " + name, flush=True)
+            return
+
+        bad("no MCP path answered an initialize")
+        _mcp_verdict()
+
+
+def _mcp_verdict() -> None:
+    print(
+        "\n  Not blocking, and worth being precise about why. The remote MCP server\n"
+        "  is for merchant-side work -- invoices, disputes, tracking, reporting --\n"
+        "  never the hold lifecycle. The Agent Toolkit does not expose\n"
+        "  authorize/void/reauthorize, which is exactly why those speak raw REST in\n"
+        "  src/mandate/providers/paypal.py. If the remote server needs the full\n"
+        "  OAuth 2.1 authorization-code flow, the fallbacks are the local MCP server\n"
+        "  or the paypal-agent-toolkit package. Neither changes the architecture.",
+        flush=True,
+    )
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--void", action="store_true", help="release the hold instead of capturing")
+    parser.add_argument(
+        "--currency",
+        default="USD",
+        choices=sorted(MINOR_UNITS),
+        help="order currency; must be one the sandbox BUSINESS account can receive",
+    )
     parser.add_argument("--mcp-only", action="store_true", help="run only the MCP probe")
     parser.add_argument("--skip-mcp", action="store_true")
     args = parser.parse_args()
@@ -220,7 +343,7 @@ async def main() -> int:
 
     async with PayPalClient(client_id, secret, base_url=SANDBOX) as pp:
         await step_token(pp)
-        await step_hold(pp, void_instead=args.void)
+        await step_hold(pp, void_instead=args.void, currency=args.currency)
     if not args.skip_mcp:
         await step_mcp()
 
