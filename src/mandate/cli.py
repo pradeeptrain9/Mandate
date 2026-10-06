@@ -1,0 +1,138 @@
+"""`mandate` -- the command line over the ledger.
+
+`replay` is the one that matters. It re-runs stored decisions through the live
+engine and fails loudly on any divergence, which is what makes the ledger a
+record rather than a diary. Run it in CI and an engine change that silently
+alters past verdicts stops being something you find out about later.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+from .engine.policy import Outcome
+from .ledger.records import Ledger, ReplayMismatch, SignatureInvalid
+
+DEFAULT_LEDGER = Path("var/decisions.jsonl")
+
+
+def _key() -> bytes:
+    key = os.environ.get("MANDATE_LEDGER_KEY", "")
+    if not key:
+        print(
+            "MANDATE_LEDGER_KEY is not set. The ledger is HMAC-signed and cannot be\n"
+            "read or written without it. See .env.example.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return key.encode("utf-8")
+
+
+def _ledger(path: Path) -> Ledger:
+    return Ledger(path, _key())
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    ledger = _ledger(args.ledger)
+    try:
+        count = ledger.verify_all()
+    except SignatureInvalid as exc:
+        print(f"TAMPERED: {exc}", file=sys.stderr)
+        return 1
+    print(f"{count} record(s) verified against the ledger key")
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    ledger = _ledger(args.ledger)
+    checked = 0
+    failures = 0
+    for record in ledger:
+        if args.decision_id and record.decision_id != args.decision_id:
+            continue
+        checked += 1
+        try:
+            record.verify(ledger.key)
+            record.assert_replays()
+        except (SignatureInvalid, ReplayMismatch) as exc:
+            failures += 1
+            print(f"FAIL {record.decision_id}: {exc}", file=sys.stderr)
+            continue
+        if args.verbose:
+            print(f"ok   {record.decision_id}  {record.evaluation.outcome.value}")
+    if args.decision_id and checked == 0:
+        print(f"no record with id {args.decision_id}", file=sys.stderr)
+        return 2
+    print(f"{checked} record(s) replayed, {failures} divergence(s)")
+    return 1 if failures else 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    ledger = _ledger(args.ledger)
+    for record in ledger:
+        if record.decision_id != args.decision_id:
+            continue
+        quote = record.quote
+        print(f"decision   {record.decision_id}")
+        print(f"evaluated  {record.evaluated_at.isoformat()}")
+        print(f"merchant   {quote.merchant_id}  ({quote.merchant_name})")
+        print(f"amount     {quote.declared_total}")
+        print(f"outcome    {record.evaluation.outcome.value.upper()}")
+        print(f"policy     {record.policy.policy_id} v{record.policy.version}")
+        print("\nrule trace:")
+        for result in record.evaluation.results:
+            mark = {
+                Outcome.ALLOW: "  ok  ",
+                Outcome.HOLD_FOR_APPROVAL: " hold ",
+                Outcome.DENY: " DENY ",
+            }[result.outcome]
+            if not result.applicable:
+                mark = " n/a  "
+            print(f"  [{mark}] {result.rule_id:<32} {result.message}")
+        return 0
+    print(f"no record with id {args.decision_id}", file=sys.stderr)
+    return 2
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    ledger = _ledger(args.ledger)
+    for record in ledger:
+        print(
+            f"{record.decision_id}  {record.evaluated_at.isoformat(timespec='seconds')}  "
+            f"{record.evaluation.outcome.value:<18} {str(record.quote.declared_total):>14}  "
+            f"{record.quote.merchant_id}"
+        )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mandate", description=__doc__)
+    parser.add_argument(
+        "--ledger", type=Path, default=DEFAULT_LEDGER, help="path to the decision ledger JSONL"
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("verify", help="check every record's signature")
+    p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("replay", help="re-run stored decisions through the engine")
+    p.add_argument("decision_id", nargs="?", help="replay one decision instead of all")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_replay)
+
+    p = sub.add_parser("show", help="print one decision and its full rule trace")
+    p.add_argument("decision_id")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("list", help="one line per decision")
+    p.set_defaults(func=cmd_list)
+
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

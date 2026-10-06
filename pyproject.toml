@@ -1,0 +1,34 @@
+[project]
+name = "mandate"
+version = "0.1.0"
+description = "A spend firewall and conditional-authorization rail for AI agents, on PayPal"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "anthropic>=0.70",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "hypothesis>=6.100"]
+
+[project.scripts]
+mandate = "mandate.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+asyncio_mode = "auto"
