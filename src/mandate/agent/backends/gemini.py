@@ -65,6 +65,26 @@ _RETRY_STATUSES = frozenset({429, 500, 503, 504})
 _WINDOW_SECONDS = 62.0
 
 
+def _is_daily_quota(body: str) -> bool:
+    """Whether a 429 means the day is spent rather than the minute.
+
+    Both arrive as 429 on the same metric name, and the difference decides whether
+    retrying is sensible or futile. A per-minute window refills in a minute; a
+    daily one does not refill today, and four 62-second waits against it is four
+    minutes of a demo spent learning nothing. Observed:
+
+      Quota exceeded for metric: generate_content_free_tier_requests, limit: 5
+      Quota exceeded for metric: generate_content_free_tier_requests, limit: 20
+
+    The metric is identical. Google's quotaId is what separates them --
+    `...PerDayPerProjectPerModel-FreeTier` against `...PerMinute...` -- so that is
+    what is matched, with the prose form as a fallback for when the structured
+    field is absent.
+    """
+    lowered = body.lower()
+    return "perday" in lowered or "per day" in lowered
+
+
 def _retry_delay(body: str) -> float | None:
     """Google's RetryInfo, when the 429 carries one.
 
@@ -352,6 +372,17 @@ class GeminiBackend:
                 last = f"HTTP {response.status_code}: {detail}"
                 if response.status_code not in _RETRY_STATUSES:
                     raise GeminiUnavailable(f"Gemini request failed ({last})")
+                if response.status_code == 429 and _is_daily_quota(detail):
+                    # Nothing to wait for. This one is not transient today.
+                    raise GeminiUnavailable(
+                        f"Gemini {self.model}: the free tier's *daily* quota for this "
+                        f"model is spent, so retrying will not help today.\n{last}\n\n"
+                        f"Each model has its own daily allowance, so another one very "
+                        f"likely still works: --model "
+                        f"{' | '.join(m for m in FREE_TIER_MODELS if m != self.model)}\n"
+                        f"Or run a scene that needs no model at all: "
+                        f"stolen-credentials, duplicate."
+                    )
 
             if attempt < self._attempts:
                 pause = min(self._backoff_cap, self._backoff * (2 ** (attempt - 1)))

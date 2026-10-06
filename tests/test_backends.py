@@ -739,3 +739,68 @@ async def test_an_attempt_cannot_outlive_the_deadline(monkeypatch):
     assert timeouts[0] == 100.0
     # And the whole thing stops near the deadline rather than at 9 x 240s.
     assert elapsed[0] <= 120.0
+
+
+async def test_a_spent_daily_quota_is_not_retried(monkeypatch):
+    """A per-minute 429 and a daily 429 are the same status on the same metric.
+
+    Telling them apart matters: four 62-second waits against a spent *day* is four
+    minutes of a demo spent learning nothing, and the remedy is a different model
+    rather than patience.
+    """
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    sent: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(1)
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "code": 429,
+                    "message": "Quota exceeded for metric: generate_content_free_tier_requests, limit: 20",
+                    "details": [
+                        {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}
+                    ],
+                }
+            },
+        )
+
+    with pytest.raises(GeminiUnavailable, match="daily"):
+        await gemini(handler, model="gemini-3.7-flash", rpm=0).complete(
+            system="s", turns=[UserTurn(text="hi")], tools=[]
+        )
+    assert len(sent) == 1
+
+
+async def test_a_per_minute_429_is_still_retried(monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    sent: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(1)
+        if len(sent) == 1:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "Quota exceeded, limit: 5",
+                        "details": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}],
+                    }
+                },
+            )
+        return reply([{"text": "ok"}])
+
+    completion = await gemini(handler, rpm=0).complete(
+        system="s", turns=[UserTurn(text="hi")], tools=[]
+    )
+    assert completion.text == "ok"
+    assert len(sent) == 2
+
+
+def test_the_daily_quota_detector_reads_both_forms():
+    from mandate.agent.backends.gemini import _is_daily_quota
+
+    assert _is_daily_quota('{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}')
+    assert _is_daily_quota("quota exceeded per day")
+    assert not _is_daily_quota('{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel"}')
