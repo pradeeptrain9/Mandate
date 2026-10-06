@@ -57,12 +57,13 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/store.py` | **Done.** SQLite, hand-written SQL, every state change recorded in the same transaction. Thread-safe. |
 | `gateway/service.py` | **Done.** The one code path: verify, project, decide, record, *then* call PayPal. |
 | `gateway/api.py` | **Done.** Split agent / operator surfaces, plus the human approval page. |
-| MCP server surface | Next. |
+| `gateway/mcp_server.py` | **Done.** Mandate as an MCP server, 7 tools, none of which can move money. |
+| `providers/toolkit.py` | **Done.** PayPal Agent Toolkit for merchant-side work, with an injectable runner and the sandbox traps documented. |
 | Buying agent | Next. |
 | Delivery oracle, webhooks, expiry job, approval SMS | Week 3. |
 | AG Grid dashboard, Render deploy | Week 4. |
 
-155 tests pass. None of them need credentials or a network.
+182 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -81,12 +82,37 @@ returned 201, and the script reported a double capture that had not happened.
 Idempotency keys now cover the amount and finality, so a retry stays idempotent
 while a different attempt gets PayPal's real refusal. Five tests pin it.
 
-One thing is still open and is **not** on the critical path: the remote MCP
-server at `mcp.sandbox.paypal.com` did not answer a cold `tools/list`. The probe
-now performs a proper streamable-HTTP `initialize` handshake against its own
-token endpoint. That server is for merchant-side work -- invoices, disputes,
-tracking, reporting -- and never for the hold lifecycle, so the fallbacks (local
-MCP server, or the `paypal-agent-toolkit` package) change nothing structural.
+### The remote MCP server, and why Mandate does not use it
+
+PayPal runs a remote MCP server at `mcp.sandbox.paypal.com`. Its OAuth metadata
+settles the question:
+
+```
+grant_types_supported: ["authorization_code", "refresh_token"]
+```
+
+No `client_credentials`. It wants an interactive browser consent flow with
+dynamic client registration, and REST credentials come back as
+`invalid_client: Client not found`. A headless gateway cannot perform that flow.
+
+So merchant-side work goes through the **`paypal-agent-toolkit` package**
+instead, which takes client credentials directly and carries the same 42 tools
+(`src/mandate/providers/toolkit.py`, verified by `scripts/toolkit_check.py`).
+Nothing structural changes: that surface was only ever for invoices, disputes,
+tracking and reporting, and the hold lifecycle speaks raw REST regardless.
+
+Two sharp edges found while wiring it up, both now pinned by tests:
+`get_merchant_insights` **raises** in sandbox rather than returning empty data,
+so the dashboard cannot be built on it; and `PayPalAPI.run` is synchronous, so
+every call goes through `asyncio.to_thread` rather than blocking the event loop.
+
+### Connecting a real agent
+
+Mandate is an MCP server, so Claude Desktop or Claude Code can be governed by it
+directly -- which is the demo worth filming. Seven tools:
+`request_authorization`, `check_budget`, `get_decision`, `list_my_holds`, and
+three catalog proxies. There is no capture, void or approve tool. Not guarded --
+absent, and a test asserts it stays that way.
 
 ## Quickstart
 

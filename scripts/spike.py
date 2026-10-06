@@ -303,53 +303,18 @@ async def step_mcp() -> None:
 
 def _mcp_verdict() -> None:
     print(
-        "\n  Not blocking, and worth being precise about why. The remote MCP server\n"
-        "  is for merchant-side work -- invoices, disputes, tracking, reporting --\n"
-        "  never the hold lifecycle. The Agent Toolkit does not expose\n"
-        "  authorize/void/reauthorize, which is exactly why those speak raw REST in\n"
-        "  src/mandate/providers/paypal.py. If the remote server needs the full\n"
-        "  OAuth 2.1 authorization-code flow, the fallbacks are the local MCP server\n"
-        "  or the paypal-agent-toolkit package. Neither changes the architecture.",
+        "\n  \033[1mSettled on 2026-10-06, not a blocker.\033[0m The metadata above is the\n"
+        "  answer: grant_types_supported is [authorization_code, refresh_token] with no\n"
+        "  client_credentials, so the remote server wants an interactive browser consent\n"
+        "  flow with dynamic client registration. A headless gateway cannot do that, and\n"
+        "  REST credentials come back as invalid_client: Client not found.\n"
+        "\n"
+        "  Mandate therefore uses the paypal-agent-toolkit package for merchant-side\n"
+        "  work -- see src/mandate/providers/toolkit.py and scripts/toolkit_check.py.\n"
+        "  It takes client credentials directly and carries the same 42 tools.\n"
+        "\n"
+        "  Nothing structural changes either way. The remote server was only ever for\n"
+        "  invoices, disputes, tracking and reporting; the hold lifecycle speaks raw\n"
+        "  REST because the toolkit exposes no authorize, void or reauthorize.",
         flush=True,
     )
-
-
-async def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--void", action="store_true", help="release the hold instead of capturing")
-    parser.add_argument(
-        "--currency",
-        default="USD",
-        choices=sorted(MINOR_UNITS),
-        help="order currency; must be one the sandbox BUSINESS account can receive",
-    )
-    parser.add_argument("--mcp-only", action="store_true", help="run only the MCP probe")
-    parser.add_argument("--skip-mcp", action="store_true")
-    args = parser.parse_args()
-
-    client_id = os.environ.get("PAYPAL_CLIENT_ID", "")
-    secret = os.environ.get("PAYPAL_CLIENT_SECRET", "")
-    if not client_id or not secret:
-        print(
-            "Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET from a sandbox app at\n"
-            "https://developer.paypal.com/dashboard/applications/sandbox",
-            file=sys.stderr,
-        )
-        return 2
-
-    if args.mcp_only:
-        await step_mcp()
-        return 0
-
-    async with PayPalClient(client_id, secret, base_url=SANDBOX) as pp:
-        await step_token(pp)
-        await step_hold(pp, void_instead=args.void, currency=args.currency)
-    if not args.skip_mcp:
-        await step_mcp()
-
-    print("\n\033[1mSpike complete.\033[0m Anything marked FAIL above changes the plan.\n")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))

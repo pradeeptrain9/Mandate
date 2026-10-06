@@ -14,6 +14,13 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "anthropic>=0.70",
   "python-dotenv>=1.0",
+  # Mandate exposes itself as an MCP server so a third-party agent (Claude
+  # Desktop, Claude Code) can be governed by it. 2.x renamed FastMCP -> MCPServer.
+  "mcp>=2.0",
+  # Used for merchant-side PayPal work only -- invoices, disputes, tracking,
+  # reporting. The hold lifecycle speaks raw REST because the toolkit does not
+  # expose authorize/void/reauthorize.
+  "paypal-agent-toolkit>=1.11",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +28,7 @@ dev = ["pytest>=8.0", "hypothesis>=6.100"]
 
 [project.scripts]
 mandate = "mandate.cli:main"
+mandate-mcp = "mandate.gateway.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=69"]
