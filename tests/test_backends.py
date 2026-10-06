@@ -707,3 +707,35 @@ async def test_one_request_gives_up_on_a_deadline(monkeypatch):
         await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
     # Stopped on the clock, not on the count: 99 attempts were allowed.
     assert len(sent) < 10
+
+
+async def test_an_attempt_cannot_outlive_the_deadline(monkeypatch):
+    """A deadline checked only between attempts bounds nothing.
+
+    The first version of this let a 240s read timeout sail past a 150s deadline:
+    two attempts cost eight minutes, and a turn sat silent with nothing in the log
+    to say why. Each attempt now gets at most the time that is left.
+    """
+    timeouts: list[float] = []
+    elapsed = [0.0]
+
+    async def advance(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        # Spend the whole allowance, the way a read timeout would.
+        elapsed[0] += timeouts[-1]
+        raise httpx.ReadTimeout("", request=request)
+
+    backend = gemini(handler, attempts=9, backoff=0.0, deadline=100.0, timeout=240.0, rpm=0)
+    with pytest.raises(GeminiUnavailable):
+        await backend.complete(system="s", turns=[UserTurn(text="hi")], tools=[])
+
+    # First attempt is capped at the deadline, not at the 240s transport timeout.
+    assert timeouts[0] == 100.0
+    # And the whole thing stops near the deadline rather than at 9 x 240s.
+    assert elapsed[0] <= 120.0

@@ -262,7 +262,12 @@ class GeminiBackend:
         attempts: int = 5,
         backoff: float = 3.0,
         backoff_cap: float = 20.0,
-        deadline: float = 150.0,
+        # Bounds the whole request including its retries. Each attempt is also
+        # given no more than the time left, because a deadline checked only between
+        # attempts does not bound anything: the first version of this let a 240s
+        # read timeout sail straight past a 150s deadline, and a turn sat silent
+        # for minutes with nothing in the log to say why.
+        deadline: float = 300.0,
         # The free tier allows five generateContent calls a minute per model, and
         # an agent turn is one call. A five-step basket therefore hits the limit
         # on its last step -- which is exactly what happened: four tools, then
@@ -313,15 +318,20 @@ class GeminiBackend:
         last = ""
         started = time.monotonic()
         for attempt in range(1, self._attempts + 1):
-            if attempt > 1 and time.monotonic() - started > self._deadline:
+            remaining = self._deadline - (time.monotonic() - started)
+            if attempt > 1 and remaining <= 0:
                 last = f"{last} (gave up after {time.monotonic() - started:.0f}s)"
                 break
             await self._wait_for_a_slot()
+            # Pacing counts against the deadline too, so this is recomputed after
+            # the wait rather than before it.
+            remaining = self._deadline - (time.monotonic() - started)
             try:
                 response = await self._http.post(
                     f"{BASE_URL}/{self.model}:generateContent",
                     params={"key": self.api_key},
                     json=body,
+                    timeout=min(self._timeout, max(5.0, remaining)),
                 )
             except httpx.HTTPError as exc:
                 # `str(httpx.ReadTimeout())` is the empty string, so the obvious
