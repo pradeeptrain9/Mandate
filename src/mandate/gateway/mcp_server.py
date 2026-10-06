@@ -111,7 +111,9 @@ async def request_authorization(quote: dict, reason: str = "") -> dict:
         "explanation": result.explain(),
         "rule_trace": [
             {
-                "rule": r.rule_id,
+                # `rule_id`, matching the REST adapter. The two surfaces must
+                # describe a decision identically or a reader has to learn both.
+                "rule_id": r.rule_id,
                 "outcome": r.outcome.value,
                 "message": r.message,
                 "applicable": r.applicable,

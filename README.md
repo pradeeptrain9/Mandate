@@ -59,7 +59,9 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/api.py` | **Done.** Split agent / operator surfaces, plus the human approval page. |
 | `gateway/mcp_server.py` | **Done.** Mandate as an MCP server, 7 tools, none of which can move money. |
 | `providers/toolkit.py` | **Done.** PayPal Agent Toolkit for merchant-side work, with an injectable runner and the sandbox traps documented. |
-| Buying agent | Next. |
+| `agent/buyer.py` | **Done, verified live.** Claude with real tools over real HTTP. No PayPal credentials, no capture/void/approve tool. |
+| `agent/budget.py` | **Done.** Model spend priced from reported usage, hard cap checked before every turn. |
+| `scripts/run_scene.py` | **Done.** Runs a scene against the real gateway, real sandbox and real model. |
 | Delivery oracle, webhooks, expiry job, approval SMS | Week 3. |
 | AG Grid dashboard, Render deploy | Week 4. |
 

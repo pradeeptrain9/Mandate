@@ -99,9 +99,17 @@ async def test_a_refusal_tells_the_agent_not_to_retry(wired):
     assert "did not depend on wording" in result["next_step"]
 
 
+async def test_both_adapters_name_the_rule_the_same_way(wired):
+    """The REST and MCP surfaces must describe a decision identically, or a reader
+    has to learn two vocabularies for one thing."""
+    result = await mcp_server.request_authorization(fresh())
+    assert all("rule_id" in entry for entry in result["rule_trace"])
+    assert not any("rule" in entry and "rule_id" not in entry for entry in result["rule_trace"])
+
+
 async def test_the_rule_trace_is_returned_in_full(wired):
     result = await mcp_server.request_authorization(fresh())
-    rules = {r["rule"] for r in result["rule_trace"]}
+    rules = {r["rule_id"] for r in result["rule_trace"]}
     assert "envelope:month" in rules
     assert "approval_threshold" in rules
 
