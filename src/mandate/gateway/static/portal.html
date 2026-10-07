@@ -60,6 +60,7 @@ a{color:var(--accent)}
     </div>
     <div class="row">
       <span id="who" class="tag t-dim"></span>
+      <a id="ledgerLink" href="/v1/ops/dashboard" style="display:none;font-size:13px">Decision ledger</a>
       <a id="adminLink" href="/v1/ops/admin" style="display:none;font-size:13px">Admin console</a>
       <button class="ghost small" onclick="signOut()">Sign out</button>
     </div>
@@ -92,7 +93,13 @@ async function boot() {
   if (!r.ok) { location.href = '/login?next=/app'; return; }
   me = await r.json();
   document.getElementById('who').textContent = me.username + ' · ' + me.role;
-  if (me.can_approve) document.getElementById('adminLink').style.display = '';
+  // Shown only to an approver, because both are behind the operator gate -- a
+  // requester clicking them would get a 403, which is a worse answer than a link
+  // that was never there.
+  if (me.can_approve) {
+    document.getElementById('adminLink').style.display = '';
+    document.getElementById('ledgerLink').style.display = '';
+  }
   loadRequests();
   loadApprovals();
 }

@@ -79,7 +79,7 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `render.yaml` | **Done.** Blueprint for both services, with the free-tier disk caveat documented rather than hidden. |
 | `scripts/seed_demo.py` | **Done.** A month of history from nothing, produced by the real engine so every seeded record still replays. |
 
-443 tests pass. None of them need credentials or a network.
+444 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -202,7 +202,7 @@ should copy into anything.
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest          # 443 tests, no credentials, no network
+.venv/bin/python -m pytest          # 444 tests, no credentials, no network
 ./scripts/bootstrap_env.sh
 ./scripts/serve.sh                  # merchant and gateway, Ctrl-C stops both
 ```
@@ -546,8 +546,17 @@ the right answer for a sandbox with no disputes, and distinguishable from not ha
 ## The portal a person uses
 
 ```
-/login   →  /app
+/   →  sign in  →  /app
 ```
+
+The root is the sign-in form, and anyone already signed in is sent straight through to `/app`
+rather than asked again. What the project *is* lives at `/about`, linked from the form — it used
+to be the root, until it became obvious that the first thing a person does with a link they have
+been given is try to use the thing, not read about it.
+
+From `/app`, an approver gets links on to the **decision ledger** and the **admin console**. A
+requester does not, because both sit behind the operator gate and a link that answers 403 is a
+worse answer than a link that was never there.
 
 Someone describes what they need in their own words, gets options back, picks one, and
 watches the firewall decide. The example this was built around:

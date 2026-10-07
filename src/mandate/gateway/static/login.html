@@ -42,7 +42,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
       <button id="go" type="submit">Sign in</button>
     </form>
   </div>
-  <p class="foot">Sessions last 12 hours and can be revoked.</p>
+  <p class="foot">Sessions last 12 hours and can be revoked.<br>
+    <a href="/about">What is this?</a></p>
 </main>
 <script>
 const params = new URLSearchParams(location.search);
@@ -70,9 +71,10 @@ document.getElementById('form').addEventListener('submit', async e => {
       err.className = 'err on';
       return;
     }
-    const me = await r.json();
-    // An approver lands on the console, everyone else on their own requests.
-    location.href = next !== '/app' ? next : (me.can_approve ? '/v1/ops/admin' : '/app');
+    // Everyone lands on /app. An approver gets links onward from there; sending
+    // them straight to the console skipped the page showing what they had asked
+    // for themselves.
+    location.href = next;
   } catch {
     err.textContent = 'Could not reach the server.';
     err.className = 'err on';

@@ -704,21 +704,28 @@ def test_the_overview_says_whether_disputes_could_be_checked(client):
     assert all(row["dispute"] is None for row in body["decisions"])
 
 
-def test_the_bare_url_explains_what_this_is(client):
+def test_the_bare_url_is_the_front_door(client):
     """A 404 on the root of a hosted demo reads as "broken" to anyone who pastes
-    the URL, which on a submission is the first thing a judge does."""
-    response = client.get("/")
+    the URL, and an explainer reads as "I cannot use this yet". The first thing a
+    person does with a link they were given is try to use the thing."""
+    fresh = TestClient(client.app)  # no session
+    response = fresh.get("/", follow_redirects=False)
     assert response.status_code == 200
-    body = response.text
-    # The two surfaces, and the claim the project actually makes.
-    assert "/v1/ops/dashboard" in body
-    assert "holds, not payments" in body
+    assert "Sign in" in response.text
     # No secrets, no data, nothing that needs keeping in sync with the ledger.
-    assert "decision_id" not in body
+    assert "decision_id" not in response.text
 
 
-def test_the_index_is_not_a_redirect_to_the_dashboard(client):
-    """Sending every visitor to the operator view would hide that the gateway is
-    an API with two deliberately separated surfaces."""
+def test_someone_already_signed_in_is_not_asked_again(client):
+    """The `client` fixture is signed in, so the front door opens."""
     response = client.get("/", follow_redirects=False)
-    assert response.status_code == 200
+    assert response.status_code == 303
+    assert response.headers["location"] == "/app"
+
+
+def test_what_the_project_is_still_has_a_page(client):
+    """Moved off the root rather than deleted -- a judge wanting the argument
+    before the login form should still find it."""
+    body = client.get("/about").text
+    assert "holds, not payments" in body
+    assert "/v1/ops/dashboard" in body

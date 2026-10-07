@@ -1303,15 +1303,26 @@ def create_app(gw: Gateway | None = None) -> FastAPI:
             return RedirectResponse("/login?next=/app", status_code=303)
         return HTMLResponse(PORTAL.read_text(encoding="utf-8"))
 
-    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def index() -> str:
-        """What this is, for anyone who pastes the bare URL.
+    @app.get("/", include_in_schema=False)
+    def root(request: Request):
+        """The front door: sign in, or go straight through if you already have.
 
-        Not a redirect to the dashboard. The gateway is an API with two
-        deliberately separated surfaces, and sending every visitor straight to the
-        operator view would hide that -- and would send a judge to the one page
-        that says nothing about why any of it exists.
+        Serving the login form here rather than redirecting to /login keeps the
+        address bar on the URL people were given. Anyone already signed in is sent
+        on to their own page instead of being asked to sign in again, which is the
+        only thing more annoying than a login page.
+
+        What the project *is* lives at /about, linked from the form. That page was
+        the root until someone pointed out that the first thing a person does with
+        a link they have been given is try to use the thing, not read about it.
         """
+        if request.app.state.accounts.whoami(request.cookies.get(COOKIE)) is not None:
+            return RedirectResponse("/app", status_code=303)
+        return HTMLResponse(LOGIN.read_text(encoding="utf-8"))
+
+    @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
+    def about() -> str:
+        """What this is, for anyone who wants to know before signing in."""
         return INDEX
 
     @app.get("/health", tags=["ops"])
