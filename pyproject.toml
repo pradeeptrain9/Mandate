@@ -92,7 +92,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests name what they do rather than what they return, and reach into internals
 # on purpose.
-"tests/*" = ["S105", "S106", "TRY"]
+# S105-S107: test fixtures carry credentials, and they are credentials for an
+# in-memory database that exists for the length of one test.
+"tests/*" = ["S105", "S106", "S107", "TRY"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["mandate"]

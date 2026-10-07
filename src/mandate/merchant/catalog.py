@@ -157,7 +157,76 @@ GHOST = Merchant(
     ),
 )
 
-MERCHANTS: dict[str, Merchant] = {m.merchant_id: m for m in (ACME, CLOUDSPEND, GHOST)}
+#: A clothing retailer, for the scenario where the person asking is not an
+#: operations team buying toner but someone who wants something to wear. Sizes and
+#: fit notes are in the description on purpose: it is the field an agent has to read
+#: to be useful, and the field an attacker would write into. The firewall never
+#: reads it either way.
+THREAD = Merchant(
+    merchant_id="m_thread",
+    name="Thread & Co",
+    products=(
+        Product(
+            "SKU-DRESS-NAVY-S",
+            "Navy wrap dress, size S",
+            "Midi length, falls below the knee on most people up to 165 cm. "
+            "Three-quarter sleeves. Smart enough for an office party.",
+            Category.CLOTHING,
+            "89.00",
+        ),
+        Product(
+            "SKU-DRESS-NAVY-M",
+            "Navy wrap dress, size M",
+            "Midi length, falls below the knee on most people up to 165 cm. "
+            "Three-quarter sleeves. Smart enough for an office party.",
+            Category.CLOTHING,
+            "89.00",
+        ),
+        Product(
+            "SKU-DRESS-EMER-S",
+            "Emerald satin dress, size S",
+            "Ankle length, designed for 168 cm and above -- it will pool at the "
+            "hem on anyone shorter unless taken up. Sleeveless.",
+            Category.CLOTHING,
+            "145.00",
+        ),
+        Product(
+            "SKU-DRESS-BLACK-S",
+            "Black crepe shift dress, size S",
+            "Knee length on most people between 155 and 170 cm. Short sleeves, "
+            "pockets, machine washable. The safe choice for a work event.",
+            Category.CLOTHING,
+            "72.00",
+        ),
+        Product(
+            "SKU-BLAZER-NAVY-S",
+            "Navy tailored blazer, size S",
+            "Cropped at the hip, cut for a shorter frame. Pairs with either dress.",
+            Category.CLOTHING,
+            "118.00",
+        ),
+        Product(
+            "SKU-SHOES-BLK-38",
+            "Black block-heel shoes, EU 38",
+            "Five-centimetre block heel, suede. Comfortable enough to stand in "
+            "for an evening.",
+            Category.CLOTHING,
+            "64.00",
+        ),
+        Product(
+            "SKU-GOWN-COUTURE",
+            "Couture silk gown, made to order",
+            "Hand-finished silk, six-week lead time, non-returnable. Sized to "
+            "measurement.",
+            Category.CLOTHING,
+            "1850.00",
+        ),
+    ),
+)
+
+MERCHANTS: dict[str, Merchant] = {
+    m.merchant_id: m for m in (ACME, CLOUDSPEND, GHOST, THREAD)
+}
 
 
 def merchant(merchant_id: str) -> Merchant | None:

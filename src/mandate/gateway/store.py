@@ -110,6 +110,27 @@ CREATE TABLE IF NOT EXISTS policies (
     created_at  TEXT NOT NULL
 );
 
+-- Who may use this gateway. Passwords are PBKDF2 with a per-user salt; the
+-- plaintext is never stored. See gateway/accounts.py.
+CREATE TABLE IF NOT EXISTS users (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+-- Server-side sessions, not signed cookies carrying claims. The difference is
+-- revocation: a signed cookie asserting a role stays valid until it expires no
+-- matter what the operator does, and "we cannot lock out a compromised account
+-- until Tuesday" is not acceptable for the thing that approves payments. Only the
+-- token's digest is kept, so this table cannot be used to log in.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_sha256 TEXT PRIMARY KEY,
+    username     TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS seen_webhooks (
     event_id   TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,

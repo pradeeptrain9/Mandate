@@ -46,6 +46,7 @@ def demo_policy() -> Policy:
                 Category.HARDWARE,
                 Category.PROFESSIONAL_SERVICES,
                 Category.FOOD,
+                Category.CLOTHING,
             }
         ),
         denied_categories=IRREVERSIBLE,
@@ -53,6 +54,8 @@ def demo_policy() -> Policy:
             (Category.COMPUTE, usd("300.00")),
             (Category.OFFICE_SUPPLIES, usd("150.00")),
             (Category.FOOD, usd("60.00")),
+            # Retail: one outfit, not a wardrobe.
+            (Category.CLOTHING, usd("200.00")),
         ),
         merchants=(
             MerchantRule("m_acme", per_transaction_cap=usd("250.00")),
@@ -61,6 +64,7 @@ def demo_policy() -> Policy:
             # allowed* merchant: the point is that a hold expires safely even
             # when the policy had no reason to refuse in the first place.
             MerchantRule("m_ghost", per_transaction_cap=usd("200.00")),
+            MerchantRule("m_thread", per_transaction_cap=usd("300.00")),
             MerchantRule("m_disabled", enabled=False),
         ),
         envelopes=(

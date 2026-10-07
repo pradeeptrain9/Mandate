@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from ..engine.money import Money
 from ..engine.policy import Evaluation, Outcome, Policy
@@ -157,6 +158,8 @@ class Gateway:
         #: link with issue_approval_link, so a judge can run the scene with no phone.
         self.approver = approver or Approver(None, "")
         self.toolkit = toolkit
+        #: Used only to shortlist things to buy. Never consulted about money.
+        self.shopping_backend: Any = None
 
     @property
     def policy(self) -> Policy:

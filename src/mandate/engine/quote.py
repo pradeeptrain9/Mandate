@@ -51,6 +51,9 @@ class Category(StrEnum):
     TRAVEL = "travel"
     HARDWARE = "hardware"
     PROFESSIONAL_SERVICES = "professional_services"
+    #: Added for the retail scenario. Ordinary, reversible, and returnable, which
+    #: is why it sits with the allowed categories rather than the three below.
+    CLOTHING = "clothing"
     GIFT_CARD = "gift_card"
     CRYPTO = "crypto"
     CASH_EQUIVALENT = "cash_equivalent"

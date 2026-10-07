@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · Mandate</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0d10;--panel:#11151b;--line:#1b212b;--fg:#e6e9ef;
+  --dim:#8b93a3;--accent:#7aa2f7;--deny:#f7768e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);min-height:100vh;display:flex;
+  align-items:center;justify-content:center;padding:24px;
+  font:15px/1.6 ui-sans-serif,system-ui,-apple-system,sans-serif}
+main{width:100%;max-width:380px}
+h1{font-size:22px;margin:0 0 4px}
+p.sub{color:var(--dim);font-size:13px;margin:0 0 24px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px}
+label{display:block;color:var(--dim);font-size:12px;margin:0 0 5px}
+input{width:100%;background:#0b0d10;color:var(--fg);border:1px solid var(--line);
+  border-radius:7px;padding:10px 11px;font:inherit;margin-bottom:14px}
+input:focus{outline:none;border-color:var(--accent)}
+button{width:100%;background:var(--accent);color:#06080c;border:0;border-radius:7px;
+  padding:11px;font:inherit;font-weight:600;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+.err{background:#2a0f16;border:1px solid var(--deny);color:#ffc9d2;border-radius:7px;
+  padding:10px 12px;font-size:13px;margin-bottom:14px;display:none}
+.err.on{display:block}
+.foot{color:var(--dim);font-size:12px;margin-top:16px;text-align:center}
+</style>
+</head>
+<body>
+<main>
+  <h1>Mandate</h1>
+  <p class="sub">Spending that an agent asks for and a person decides.</p>
+  <div class="panel">
+    <div id="err" class="err"></div>
+    <form id="form" autocomplete="on">
+      <label for="u">Username</label>
+      <input id="u" name="username" autocomplete="username" autofocus required>
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+      <button id="go" type="submit">Sign in</button>
+    </form>
+  </div>
+  <p class="foot">Sessions last 12 hours and can be revoked.</p>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+const next = params.get('next') || '/app';
+
+document.getElementById('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const err = document.getElementById('err');
+  const go = document.getElementById('go');
+  err.className = 'err';
+  go.disabled = true;
+  go.textContent = 'Signing in…';
+  try {
+    const r = await fetch('/app/login', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({
+        username: document.getElementById('u').value,
+        password: document.getElementById('p').value
+      })
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      err.textContent = body.detail || 'That did not work.';
+      err.className = 'err on';
+      return;
+    }
+    const me = await r.json();
+    // An approver lands on the console, everyone else on their own requests.
+    location.href = next !== '/app' ? next : (me.can_approve ? '/v1/ops/admin' : '/app');
+  } catch {
+    err.textContent = 'Could not reach the server.';
+    err.className = 'err on';
+  } finally {
+    go.disabled = false;
+    go.textContent = 'Sign in';
+  }
+});
+</script>
+</body>
+</html>

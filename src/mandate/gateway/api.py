@@ -21,12 +21,14 @@ absent from the interface they can reach.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+import httpx
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..delivery.carrier import AlwaysDelivers, MerchantCarrier, NeverDelivers
@@ -38,6 +40,8 @@ from ..policies import demo_policy
 from ..providers.paypal import LIVE, SANDBOX, PayPalClient
 from ..providers.toolkit import Toolkit
 from . import disputes as dispute_api
+from . import portal as portal_api
+from .accounts import COOKIE, Accounts, AuthError, Role, User
 from .approvals import build_approver
 from .policy_store import PolicyRejected, PolicyStore, validate
 from .policy_store import seed as seed_policy
@@ -51,6 +55,8 @@ from .sweep import sweep
 #: see the file rather than a string in a Python module.
 DASHBOARD = Path(__file__).parent / "static" / "dashboard.html"
 ADMIN = Path(__file__).parent / "static" / "admin.html"
+LOGIN = Path(__file__).parent / "static" / "login.html"
+PORTAL = Path(__file__).parent / "static" / "portal.html"
 
 #: The bare URL returned 404, which on a hosted demo reads as "broken" rather than
 #: "this is an API". Small and inline rather than another file: it has no data in it
@@ -89,9 +95,73 @@ model in the path &mdash; and approved intents become holds, not payments.</p>
 request can take about a minute, and the ledger resets on each restart.</p>
 </main></body></html>"""
 
+logger = logging.getLogger(__name__)
+
+def _bootstrap_admin(accts: Accounts) -> None:
+    """Create the first approver from the environment, once.
+
+    Only when there are no users at all. A deployment that re-created an admin on
+    every restart would quietly undo a password change, and would do it at the
+    moment nobody is watching -- the same reason the policy seed does not upsert.
+
+    With nothing set, no account exists and nobody can sign in. That is the correct
+    default: an application that ships with a working username and password ships
+    with a working username and password for everybody.
+    """
+    username = os.environ.get("MANDATE_ADMIN_USER", "").strip()
+    password = os.environ.get("MANDATE_ADMIN_PASSWORD", "")
+    if not username or not password or accts.count():
+        return
+    try:
+        accts.create(username, password, role=Role.APPROVER)
+    except ValueError as exc:
+        # Never the password itself, and never a stack trace into a log.
+        logger.warning("could not create the bootstrap admin: %s", exc)
+
+
+def gateway(request: Request) -> Gateway:
+    return request.app.state.gateway
+
+
+def accounts(request: Request) -> Accounts:
+    return request.app.state.accounts
+
+
+def signed_in(request: Request) -> User:
+    """Whoever is calling, or 401.
+
+    A 401 rather than a redirect, because these are the JSON routes; the HTML pages
+    redirect themselves. Returning a login page body with a 200 to a fetch() is how
+    a UI ends up rendering the word "password" inside a table.
+    """
+    user = request.app.state.accounts.whoami(request.cookies.get(COOKIE))
+    if user is None:
+        raise HTTPException(401, "sign in first")
+    return user
+
+
+def approver(request: Request) -> User:
+    """Signed in *and* allowed to decide.
+
+    Separate from `signed_in` rather than a flag on it, so that a route either has
+    the check in its signature or does not have it at all. A boolean argument is
+    the kind of thing that gets defaulted wrong once and never noticed.
+    """
+    user = signed_in(request)
+    if not user.can_approve:
+        raise HTTPException(403, "this needs an approver account")
+    return user
+
+
 agent_router = APIRouter(prefix="/v1/agent", tags=["agent"])
+app_router = APIRouter(prefix="/app", tags=["portal"])
 webhook_router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
-ops_router = APIRouter(prefix="/v1/ops", tags=["operator"])
+#: Every operator route requires an approver session. Declared on the router rather
+#: than per route, so a new route added later is protected by default -- the
+#: opposite arrangement protects whichever routes someone remembered.
+ops_router = APIRouter(
+    prefix="/v1/ops", tags=["operator"], dependencies=[Depends(approver)]
+)
 buyer_router = APIRouter(tags=["buyer"])
 
 
@@ -150,11 +220,41 @@ def build_gateway() -> Gateway:
     # every restart, at the moment nobody is watching.
     gateway.policies = PolicyStore(gateway.store)
     seed_policy(gateway.policies, demo_policy())
+    # Used to shortlist things to buy, and for nothing else. Optional: with no
+    # provider configured the portal falls back to keyword matching, which is worse
+    # at the job and still lets a judge with no API key see the whole flow.
+    try:
+        from ..agent.backends import choose
+        from ..agent.backends.gemini import GeminiBackend
+
+        backend = choose()
+        if isinstance(backend, GeminiBackend):
+            # A much tighter budget than the agent loop gets, because this is a
+            # person waiting on a page rather than a scene running unattended. The
+            # loop's defaults -- five attempts inside a 300s deadline -- are right
+            # when the alternative is a half-finished basket, and wrong here: a
+            # shortlist is a convenience, and nobody waits five minutes for one.
+            # Fail in a few seconds and fall back to keyword matching.
+            backend = GeminiBackend(
+                backend.api_key,
+                model=backend.model,
+                # One attempt, not several. Retrying a congested free tier spends
+                # one of its five-per-minute requests to make the *next* caller
+                # wait, which is a bad trade for a convenience feature -- the
+                # module's own comments make this argument about the agent loop,
+                # and it is more true here. If the model is up it answers in a
+                # couple of seconds; if it is not, keyword matching is immediate.
+                attempts=1,
+                deadline=9.0,
+                timeout=8.0,
+                # No pacing either: this is a single request, not a tool loop, and
+                # waiting 60s for a slot defeats the point of a short deadline.
+                rpm=0,
+            )
+        gateway.shopping_backend = backend
+    except Exception as exc:  # noqa: BLE001 - shopping must not stop the gateway booting
+        logger.info("no model for shortlisting: %s", exc)
     return gateway
-
-
-def gateway(request: Request) -> Gateway:
-    return request.app.state.gateway
 
 
 # -- shapes -----------------------------------------------------------------
@@ -273,6 +373,175 @@ def get_decision(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
     except UnknownHold:
         raise HTTPException(404, f"no decision {decision_id}") from None
     return {"hold": _hold_json(hold), "events": gw.store.events(decision_id)}
+
+
+# -- signing in -------------------------------------------------------------
+
+
+class Credentials(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=400)
+
+
+@app_router.post("/login")
+def login(
+    body: Credentials, response: Response, accts: Accounts = Depends(accounts)
+) -> dict:
+    try:
+        token = accts.login(body.username, body.password)
+    except AuthError as exc:
+        # One message for "no such user" and "wrong password". Telling them apart
+        # tells an attacker which usernames exist, and nobody else benefits.
+        raise HTTPException(401, str(exc)) from None
+    response.set_cookie(
+        COOKIE,
+        token,
+        httponly=True,       # JavaScript cannot read it, so an XSS cannot steal it
+        samesite="lax",      # not sent on cross-site POSTs
+        secure=False,        # see the note in build_gateway about running behind TLS
+        max_age=12 * 3600,
+        path="/",
+    )
+    user = accts.get(body.username)
+    return {"username": user.username, "role": user.role.value, "can_approve": user.can_approve}
+
+
+@app_router.post("/logout")
+def logout(request: Request, response: Response, accts: Accounts = Depends(accounts)) -> dict:
+    """Ends the session server-side, not just in the browser.
+
+    Clearing the cookie alone would leave a token that still works for anyone who
+    copied it, which is the failure mode signed-cookie sessions cannot fix at all.
+    """
+    accts.logout(request.cookies.get(COOKIE))
+    response.delete_cookie(COOKIE, path="/")
+    return {"ok": True}
+
+
+@app_router.get("/me")
+def me(user: User = Depends(signed_in)) -> dict:
+    return {"username": user.username, "role": user.role.value, "can_approve": user.can_approve}
+
+
+# -- the person's surface ---------------------------------------------------
+
+
+class NeedBody(BaseModel):
+    """What someone wants, in their own words.
+
+    Free text, and it goes to a model that shortlists. It never reaches the policy
+    engine -- `evaluate()` has no parameter for prose -- so the worst a hostile
+    string here can do is produce a bad shopping list.
+    """
+
+    need: str = Field(min_length=3, max_length=2000)
+    merchant_id: str = Field(default="m_thread", max_length=64)
+
+
+class ChoiceBody(BaseModel):
+    sku: str = Field(min_length=1, max_length=120)
+    quantity: int = Field(default=1, ge=1, le=20)
+    merchant_id: str = Field(default="m_thread", max_length=64)
+    need: str = Field(default="", max_length=2000)
+
+
+@app_router.post("/shortlist")
+async def shortlist(
+    body: NeedBody, user: User = Depends(signed_in), gw: Gateway = Depends(gateway)
+) -> dict:
+    """Ask for options. Nothing here touches money."""
+    from ..shopping import propose
+
+    merchant_url = os.environ.get("MANDATE_MERCHANT_URL", "http://localhost:8001")
+    try:
+        options, note = await propose(
+            body.need,
+            merchant_url=merchant_url,
+            merchant_id=body.merchant_id,
+            merchant_name="",
+            backend=gw.shopping_backend,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"could not reach the shop: {exc}") from exc
+    return {"options": [o.as_json() for o in options], "how": note}
+
+
+@app_router.post("/buy")
+async def buy(
+    body: ChoiceBody, user: User = Depends(signed_in), gw: Gateway = Depends(gateway)
+) -> dict:
+    """Take one option to the firewall.
+
+    The person chose it and a model suggested it, and neither fact changes anything
+    here: the quote is fetched and signed by the merchant, and the engine decides on
+    the numbers exactly as it would for any agent. A shortlist is a suggestion.
+    """
+    merchant_url = os.environ.get("MANDATE_MERCHANT_URL", "http://localhost:8001")
+    async with httpx.AsyncClient(timeout=30.0) as http:
+        try:
+            response = await http.post(
+                f"{merchant_url.rstrip('/')}/merchants/{body.merchant_id}/quote",
+                json={"lines": [{"sku": body.sku, "quantity": body.quantity}]},
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"could not reach the shop: {exc}") from exc
+    if response.status_code >= 400:
+        raise HTTPException(response.status_code, response.json().get("detail", "the shop refused"))
+
+    try:
+        quote = dec_quote(response.json()["quote"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(502, f"the shop sent a malformed quote: {exc}") from exc
+
+    try:
+        result = await gw.request_authorization(
+            AuthorizationRequest(
+                quote=quote,
+                reason=body.need or f"chose {body.sku}",
+                # The person is the requester, so their own requests are the ones
+                # they can see. Not a display name: this is what /app/requests
+                # filters on.
+                agent_id=user.username,
+            )
+        )
+    except GatewayError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    return {
+        "decision_id": result.decision_id,
+        "outcome": result.outcome.value,
+        "state": result.state.value,
+        "explanation": result.explain(),
+        "rule_trace": _trace_json(result.evaluation),
+        "buyer_approval_url": result.approval_url
+        if result.outcome is Outcome.ALLOW
+        else None,
+        "status": portal_api.STATUS.get(result.state.value, (result.state.value, ""))[0],
+    }
+
+
+@app_router.get("/requests")
+def my_requests(user: User = Depends(signed_in), gw: Gateway = Depends(gateway)) -> dict:
+    """Only this person's. Filtered in SQL, not in the page."""
+    return {"requests": portal_api.own_requests(gw.store, user.username)}
+
+
+@app_router.get("/approvals")
+def my_approvals(user: User = Depends(signed_in), gw: Gateway = Depends(gateway)) -> dict:
+    """What this person has to decide. Empty for a requester, by construction."""
+    if not user.can_approve:
+        return {"approvals": [], "can_approve": False}
+    waiting = gw.store.list(states=frozenset({HoldState.AWAITING_HUMAN}))
+    return {
+        "approvals": [
+            {
+                **_hold_json(h),
+                "mine": h.agent_id == user.username,
+            }
+            for h in waiting
+        ],
+        "can_approve": True,
+    }
 
 
 # -- operator surface -------------------------------------------------------
@@ -882,7 +1151,7 @@ button{{flex:1;padding:.85rem;font-size:1rem;font-weight:600;border-radius:10px;
 
 
 @ops_router.get("/admin", response_class=HTMLResponse)
-def admin() -> str:
+def admin(user: User = Depends(approver)) -> str:
     """Approvals queue and the rules editor.
 
     Operator surface, like everything else under /v1/ops. The page can raise a
@@ -993,10 +1262,28 @@ def create_app(gw: Gateway | None = None) -> FastAPI:
         ),
     )
     app.state.gateway = gw or build_gateway()
+    app.state.accounts = Accounts(app.state.gateway.store)
+    _bootstrap_admin(app.state.accounts)
+    app.include_router(app_router)
     app.include_router(agent_router)
     app.include_router(ops_router)
     app.include_router(webhook_router)
     app.include_router(buyer_router)
+
+    @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+    def login_page() -> str:
+        return LOGIN.read_text(encoding="utf-8")
+
+    @app.get("/app", include_in_schema=False)
+    def portal_page(request: Request):
+        """The person's home. Redirects rather than 401s, because this is a page.
+
+        A fetch() gets JSON and a 401; a browser address bar gets sent somewhere it
+        can do something about it.
+        """
+        if request.app.state.accounts.whoami(request.cookies.get(COOKIE)) is None:
+            return RedirectResponse("/login?next=/app", status_code=303)
+        return HTMLResponse(PORTAL.read_text(encoding="utf-8"))
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> str:

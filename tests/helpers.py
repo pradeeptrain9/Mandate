@@ -44,3 +44,27 @@ def quote(
         nonce=uuid.uuid4().hex[:12],
     )
     return built.sign(sign_with) if sign_with else built
+
+
+def sign_in(
+    client,
+    *,
+    username: str = "ops@example.com",
+    password: str = "test-password-1",
+    approver: bool = True,
+):
+    """Create an account and log the TestClient into it.
+
+    Every operator route requires an approver session now, so a fixture that does
+    not do this is testing the gate rather than the route behind it.
+    """
+    from mandate.gateway.accounts import Accounts, Role
+
+    accounts = Accounts(client.app.state.gateway.store)
+    if accounts.get(username) is None:
+        accounts.create(
+            username, password, role=Role.APPROVER if approver else Role.REQUESTER
+        )
+    response = client.post("/app/login", json={"username": username, "password": password})
+    assert response.status_code == 200, response.text
+    return response.json()

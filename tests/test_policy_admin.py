@@ -23,7 +23,7 @@ from mandate.ledger.records import Ledger
 from mandate.policies import demo_policy
 
 from fake_paypal import FakePayPal
-from helpers import LEDGER_KEY, MERCHANT_SECRET, quote
+from helpers import LEDGER_KEY, MERCHANT_SECRET, quote, sign_in
 
 usd = lambda v: Money.from_paypal(v, "USD")  # noqa: E731
 
@@ -54,6 +54,7 @@ def gw(tmp_path, paypal):
 def client(gw):
     with TestClient(create_app(gw)) as c:
         c.gateway = gw
+        sign_in(c)
         yield c
 
 

@@ -71,13 +71,15 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | Refund path | **Done.** `POST /v1/ops/holds/{id}/refund`, operator-only. Refunds what was *captured*, not what was authorized. |
 | `gateway/sweep.py` | **Done.** Captures on confirmed delivery, releases on non-delivery, and releases rather than captures when a lapsing hold cannot be confirmed. |
 | `gateway/approvals.py`, `providers/twilio.py` | **Done.** Over-threshold decisions page a human by SMS, and the whole approval path runs without Twilio — a trial account cannot deliver the message at all, so that fallback is the demo path. |
+| `gateway/accounts.py`, `static/login.html` | **Done.** PBKDF2 passwords, revocable server-side sessions, two roles. |
+| `gateway/portal.py`, `shopping.py`, `static/portal.html` | **Done.** A person describes what they need, a model shortlists, the firewall decides. |
 | `gateway/policy_store.py`, `static/admin.html` | **Done.** Rules editable in a form, versioned and attributed, with the approvals queue beside them. |
 | `gateway/static/dashboard.html` | **Done.** AG Grid Community: the ledger, live hold states, budget burn-down, and the full rule trace for any decision. |
 | `Dockerfile`, `docker-compose.yml` | **Done, verified from a clean `--no-cache` build.** Two services from one image, non-root (uid 10001), healthchecked, ledger on a named volume. Built and run: both containers healthy, seeded inside the container, 11 records verified and replayed with 0 divergences. |
 | `render.yaml` | **Done.** Blueprint for both services, with the free-tier disk caveat documented rather than hidden. |
 | `scripts/seed_demo.py` | **Done.** A month of history from nothing, produced by the real engine so every seeded record still replays. |
 
-416 tests pass. None of them need credentials or a network.
+441 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -200,7 +202,7 @@ should copy into anything.
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest          # 416 tests, no credentials, no network
+.venv/bin/python -m pytest          # 441 tests, no credentials, no network
 ./scripts/bootstrap_env.sh
 ./scripts/serve.sh                  # merchant and gateway, Ctrl-C stops both
 ```
@@ -540,6 +542,99 @@ was still the wrong decision. A firewall that never looks at its own outcomes ca
 
 Verified live against the sandbox: `{"reachable": true, "detail": "0 disputed capture(s)"}` —
 the right answer for a sandbox with no disputes, and distinguishable from not having asked.
+
+## The portal a person uses
+
+```
+/login   →  /app
+```
+
+Someone describes what they need in their own words, gets options back, picks one, and
+watches the firewall decide. The example this was built around:
+
+> I want a dress for my office party. My height is 160 cm.
+
+**Three surfaces now, separated the same way everything else in this project is: the
+capability someone should not have is absent from the interface they can reach, rather than
+guarded inside it.**
+
+| | who | can | cannot |
+|---|---|---|---|
+| `/v1/agent/*` | an agent | ask for money | approve, capture, void, edit |
+| `/app/*` | a person | ask for things, see their own | approve their own request |
+| `/v1/ops/*` | an approver | decide the queue, change the rules | — |
+
+A requester who could approve their own purchase would make the approval threshold
+decorative in exactly the way an agent approving its own request would. The threshold exists
+to put a second person in the loop, and one person wearing both hats is not two people. So
+`/app/requests` is filtered **in SQL** by the caller's username — a view that fetches
+everything and hides most of it is one careless template edit away from showing somebody else's
+spending.
+
+### Where the model belongs, and where it does not
+
+Matching "office party" and "160 cm" to a rack of clothes is exactly what a language model is
+good at and what a rule cannot do. No policy expresses *"ankle length on a 168 cm cut will pool
+at the hem on someone shorter"*.
+
+So the model shortlists. It does not price and it does not buy.
+
+- **Every SKU it returns is checked against the catalog, and any it invents is dropped.** A
+  model naming a product that does not exist is the ordinary failure, not an exotic one.
+- **Prices are read from the merchant afterwards, never from the model's reply**, so a
+  hallucinated figure cannot reach a screen, let alone a payment.
+- **A shortlist is a suggestion.** Picking one goes through the same gateway, the same signed
+  quote and the same engine as any other request. The firewall does not care where a suggestion
+  came from.
+
+That is the rule the whole project runs on — the engine computes, the model explains — applied
+one layer earlier.
+
+**With no model configured, or a model that is down, it falls back to keyword matching and says
+so.** A person who asked for a dress should get a worse list, not an error page. The note is
+specific rather than tidy, because `BadRequestError` is what an account with no credit left
+looks like and an operator told only that goes hunting for a network problem.
+
+The shortlist also gets a far tighter budget than the agent loop: **one attempt, nine seconds**,
+no rate-limit pacing. The loop's five-attempts-over-300-seconds is right when the alternative is
+a half-finished basket, and wrong for a person waiting on a page — and retrying a congested free
+tier spends one of its five-per-minute requests to make the *next* caller wait. Measured at
+2.5–7.5s falling back, against 300s before.
+
+### Sign-in
+
+Passwords are PBKDF2-HMAC-SHA256, 600,000 iterations, per-user salt, constant-time compare. The
+cost is stored inside each hash so it can be raised later without invalidating anyone.
+
+**Sessions are opaque server-side tokens, not signed cookies carrying claims.** The difference
+is revocation: a signed cookie asserting `role=approver` stays valid until it expires no matter
+what the operator does, and *"we cannot lock out a compromised account until Tuesday"* is not an
+acceptable property for the thing that approves payments. Only the token's digest is stored, so
+the session table cannot be used to log in. The cookie is `HttpOnly` and `SameSite=Lax`.
+
+Unknown username and wrong password return **the same message**, and the hash is computed either
+way so the two take the same time. Telling them apart tells an attacker which usernames exist,
+and nobody else benefits.
+
+**No account exists unless one is configured.** `MANDATE_ADMIN_USER` and
+`MANDATE_ADMIN_PASSWORD` create the first approver, once, and only when the table is empty — a
+password change is never undone by a restart. Ship with neither set and nobody can sign in,
+which is correct: an application that ships with a working username and password ships with a
+working username and password for everybody.
+
+### What it looks like end to end
+
+Three requests from one portal, all from the same person, all decided by the same engine:
+
+| picked | amount | outcome |
+|---|---|---|
+| Black crepe shift dress | $72.00 | **allow** — "Ready to pay", PayPal link returned |
+| Couture silk gown | $1,850.00 | **deny** — hard cap, merchant cap, clothing cap, and two envelopes |
+| Emerald satin dress | $145.00 | **deny** — `envelope:hour`, because $72 was already committed against a $200 hourly cap |
+
+The third is the one worth looking at. Nothing is wrong with a $145 dress; it was refused
+because of what had already been spent that hour. That is a rolling budget doing its job, and it
+is the kind of refusal no amount of inspecting the request itself would explain.
 
 ## The admin console
 
