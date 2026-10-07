@@ -459,6 +459,27 @@ def test_the_dashboard_uses_only_ag_grid_community(client):
         assert enterprise_only not in body
 
 
+def test_no_boolean_field_is_rendered_through_a_formatter(client):
+    """AG Grid infers a column's data type from its values, and a boolean field
+    gets the checkbox renderer -- which silently ignores `valueFormatter` and
+    `cellStyle`.
+
+    That broke the Signature column: every row rendered as an unexplained tick,
+    and a record that failed to verify would have rendered as an unticked box
+    rather than a red DOES NOT VERIFY. The one alarm this table exists to raise
+    did not raise. Pinned so it cannot come back by someone shortening the column
+    definition to `field: 'verified'`.
+    """
+    page = client.get("/v1/ops/dashboard").text
+    # Comments are allowed to name the mistake; column definitions are not.
+    code = "\n".join(
+        line for line in page.splitlines() if not line.lstrip().startswith("//")
+    )
+    for boolean_or_object in ("verified", "dispute"):
+        assert f"field: '{boolean_or_object}'" not in code, boolean_or_object
+    assert "valueGetter: p => p.data.verified ? 'ok' : 'DOES NOT VERIFY'" in code
+
+
 def test_the_dashboard_is_not_on_the_agent_surface(client):
     paths = client.get("/openapi.json").json()["paths"]
     assert "/v1/ops/dashboard" in paths

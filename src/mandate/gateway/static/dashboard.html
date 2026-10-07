@@ -165,7 +165,7 @@ const columns = [
   //
   // '?' rather than blank when the lookup failed, because "nothing is disputed" and
   // "we could not ask" are opposite facts and must never render the same.
-  { headerName: 'Dispute', field: 'dispute', width: 130,
+  { headerName: 'Dispute', colId: 'dispute', width: 130,
     valueGetter: p => p.data.dispute ? p.data.dispute.status : null,
     cellStyle: p => p.value ? { color: 'var(--deny)', fontWeight: 600 } : { color: 'var(--dim)' },
     valueFormatter: p => p.value || (disputesReachable ? '—' : '?'),
@@ -174,9 +174,19 @@ const columns = [
       : (disputesReachable ? 'not disputed' : disputesDetail) },
   // Last column, and empty for a healthy ledger. An unverifiable record is the most
   // important thing this table can say, so it is a column rather than a tooltip.
-  { headerName: 'Signature', field: 'verified', width: 120,
-    cellStyle: p => p.value ? { color: 'var(--dim)' } : { color: 'var(--deny)', fontWeight: 600 },
-    valueFormatter: p => p.value ? 'ok' : 'DOES NOT VERIFY' },
+  //
+  // `valueGetter` returning a string, not `field: 'verified'` with a formatter.
+  // AG Grid infers a column's data type from its values, so a boolean field gets
+  // the boolean renderer -- a checkbox -- and `valueFormatter` and `cellStyle` are
+  // both ignored. That rendered every row as an unexplained tick and would have
+  // rendered a tampered record as an unticked box instead of a red alarm, which is
+  // the exact opposite of what this column is for.
+  { headerName: 'Signature', colId: 'verified', width: 150,
+    valueGetter: p => p.data.verified ? 'ok' : 'DOES NOT VERIFY',
+    cellStyle: p => p.value === 'ok'
+      ? { color: 'var(--dim)' }
+      : { color: 'var(--deny)', fontWeight: 600 },
+    tooltipValueGetter: p => p.data.verification || 'signature verified' },
 ];
 
 let api = null;

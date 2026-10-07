@@ -72,11 +72,11 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `gateway/sweep.py` | **Done.** Captures on confirmed delivery, releases on non-delivery, and releases rather than captures when a lapsing hold cannot be confirmed. |
 | `gateway/approvals.py`, `providers/twilio.py` | **Done.** Over-threshold decisions page a human by SMS, and the whole approval path runs without Twilio — a trial account cannot deliver the message at all, so that fallback is the demo path. |
 | `gateway/static/dashboard.html` | **Done.** AG Grid Community: the ledger, live hold states, budget burn-down, and the full rule trace for any decision. |
-| `Dockerfile`, `docker-compose.yml` | **Done, verified.** Two services from one image, non-root (uid 10001), healthchecked, ledger on a named volume. Built and run: both containers healthy, seeded inside the container, 11 records verified and replayed with 0 divergences. |
+| `Dockerfile`, `docker-compose.yml` | **Done, verified from a clean `--no-cache` build.** Two services from one image, non-root (uid 10001), healthchecked, ledger on a named volume. Built and run: both containers healthy, seeded inside the container, 11 records verified and replayed with 0 divergences. |
 | `render.yaml` | **Done.** Blueprint for both services, with the free-tier disk caveat documented rather than hidden. |
 | `scripts/seed_demo.py` | **Done.** A month of history from nothing, produced by the real engine so every seeded record still replays. |
 
-391 tests pass. None of them need credentials or a network.
+392 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -199,7 +199,7 @@ should copy into anything.
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest          # 391 tests, no credentials, no network
+.venv/bin/python -m pytest          # 392 tests, no credentials, no network
 ./scripts/bootstrap_env.sh
 ./scripts/serve.sh                  # merchant and gateway, Ctrl-C stops both
 ```
@@ -229,7 +229,7 @@ It found the bug that exercise exists to find. `pytest` collected nothing on a c
 only ever installed by hand. 373 tests passed locally and zero would have run for anyone else.
 It is pinned now.
 
-The rest, on a clone with no credentials of any kind: 391 tests pass, `bootstrap_env.sh` writes
+The rest, on a clone with no credentials of any kind: 392 tests pass, `bootstrap_env.sh` writes
 a key, both services start, `seed_demo.py` writes 11 decisions, `mandate verify` confirms all 11
 under the configured key, `mandate replay` reports 0 divergences, and the dashboard renders the
 grid, the burn-down bars and the full rule trace for the $4,000 gift-card refusal. The envelopes
