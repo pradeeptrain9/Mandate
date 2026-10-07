@@ -20,9 +20,12 @@ absent from the interface they can reach.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,6 +34,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Respons
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
+from .. import shopfront
 from ..delivery.carrier import AlwaysDelivers, MerchantCarrier, NeverDelivers
 from ..engine.money import Money
 from ..engine.policy import Outcome
@@ -495,14 +499,17 @@ async def buy(
     the numbers exactly as it would for any agent. A shortlist is a suggestion.
     """
     merchant_url = os.environ.get("MANDATE_MERCHANT_URL", "http://localhost:8001")
-    async with httpx.AsyncClient(timeout=30.0) as http:
-        try:
-            response = await http.post(
-                f"{merchant_url.rstrip('/')}/merchants/{body.merchant_id}/quote",
-                json={"lines": [{"sku": body.sku, "quantity": body.quantity}]},
-            )
-        except httpx.HTTPError as exc:
-            raise HTTPException(502, f"could not reach the shop: {exc}") from exc
+    try:
+        # Retried while the merchant wakes; see `shopfront`. Safe to repeat because
+        # a quote is priced and signed fresh each time and reserves nothing -- the
+        # engine has not seen it yet, and no money exists anywhere until it has.
+        response = await shopfront.request(
+            "POST",
+            f"{merchant_url.rstrip('/')}/merchants/{body.merchant_id}/quote",
+            json={"lines": [{"sku": body.sku, "quantity": body.quantity}]},
+        )
+    except shopfront.ShopUnreachable as exc:
+        raise HTTPException(502, str(exc)) from exc
     if response.status_code >= 400:
         raise HTTPException(response.status_code, response.json().get("detail", "the shop refused"))
 
@@ -1363,6 +1370,27 @@ def _escape(value: str) -> str:
 # -- app --------------------------------------------------------------------
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Start the merchant's cold boot now rather than when someone shops.
+
+    Fire-and-forget: the task is not awaited, so nothing is delayed waiting for a
+    service this process only talks to on demand, and `shopfront.wake` swallows
+    its own failures. A local run with no merchant configured skips it entirely.
+    """
+    task: asyncio.Task | None = None
+    url = os.environ.get("MANDATE_MERCHANT_URL", "")
+    if url:
+        task = asyncio.create_task(shopfront.wake(url))
+    try:
+        yield
+    finally:
+        # Cancelled rather than awaited: a shutdown should not wait out a 75-second
+        # timeout against an instance that is still booting.
+        if task is not None and not task.done():
+            task.cancel()
+
+
 def create_app(gw: Gateway | None = None) -> FastAPI:
     app = FastAPI(
         title="Mandate gateway",
@@ -1372,6 +1400,7 @@ def create_app(gw: Gateway | None = None) -> FastAPI:
             "only operators can capture or void. The policy engine that decides is "
             "pure and never reads prose."
         ),
+        lifespan=_lifespan,
     )
     app.state.gateway = gw or build_gateway()
     app.state.accounts = Accounts(app.state.gateway.store)

@@ -34,8 +34,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
+from . import shopfront
 from .agent.conversation import UserTurn
 from .engine.money import Money
 
@@ -82,10 +81,17 @@ class Option:
 
 
 async def catalog(merchant_url: str, merchant_id: str) -> list[dict[str, Any]]:
-    async with httpx.AsyncClient(timeout=20.0) as http:
-        response = await http.get(f"{merchant_url.rstrip('/')}/merchants/{merchant_id}/products")
-        response.raise_for_status()
-        return response.json()["products"]
+    """The merchant's real catalog. The only source a shortlist may draw from.
+
+    Goes through `shopfront` rather than httpx directly: on the free plan the
+    merchant may be asleep, and a shortlist that fails because the shop took 34
+    seconds to wake is reported to the person as the shop being unreachable.
+    """
+    response = await shopfront.request(
+        "GET", f"{merchant_url.rstrip('/')}/merchants/{merchant_id}/products"
+    )
+    response.raise_for_status()
+    return response.json()["products"]
 
 
 def _score(need: str, product: dict[str, Any]) -> int:
