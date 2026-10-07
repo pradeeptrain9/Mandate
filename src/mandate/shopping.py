@@ -33,6 +33,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 from . import shopfront
 from .agent.conversation import UserTurn
@@ -66,6 +67,10 @@ class Option:
     merchant_id: str
     merchant_name: str
     why: str
+    #: The merchant's own page for this product, for a person who wants to look
+    #: before asking for it. Empty when the merchant URL is not something a
+    #: browser should be sent to; see `page_url`.
+    page_url: str = ""
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -77,6 +82,7 @@ class Option:
             "merchant_id": self.merchant_id,
             "merchant_name": self.merchant_name,
             "why": self.why,
+            "page_url": self.page_url,
         }
 
 
@@ -107,8 +113,34 @@ STOPWORDS = frozenset(
 )
 
 
+#: Schemes a browser may be sent to. Anything else -- javascript:, data:, file: --
+#: produces no link at all rather than a link that does something else.
+BROWSABLE = frozenset({"http", "https"})
+
+
+def page_url(merchant_url: str, merchant_id: str, sku: str) -> str:
+    """The merchant's own page for one product, or "" if it cannot be linked.
+
+    Built here rather than in the page because the SKU and the merchant id are the
+    merchant's strings, not ours. They are quoted, so a SKU containing a slash or a
+    quote cannot reach outside its path segment, and the scheme is checked, so a
+    misconfigured MANDATE_MERCHANT_URL cannot turn a product link into a
+    `javascript:` one. The page that comes back is untrusted either way -- it is
+    served from a different origin and opened in its own tab, never framed or
+    inlined into the gateway's UI.
+    """
+    parsed = urlsplit(merchant_url.strip())
+    if parsed.scheme.lower() not in BROWSABLE or not parsed.netloc:
+        return ""
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+    return f"{base}/merchants/{quote(merchant_id, safe='')}/products/{quote(sku, safe='')}/page"
+
+
 def _build(
-    products: list[dict[str, Any]], merchant_id: str, merchant_name: str
+    products: list[dict[str, Any]],
+    merchant_id: str,
+    merchant_name: str,
+    merchant_url: str = "",
 ) -> dict[str, Option]:
     """The catalog as it really is, keyed by SKU. The only source of truth a
     shortlist is allowed to draw from."""
@@ -122,6 +154,7 @@ def _build(
             merchant_id=merchant_id,
             merchant_name=merchant_name,
             why="",
+            page_url=page_url(merchant_url, merchant_id, p["sku"]) if merchant_url else "",
         )
         for p in products
     }
@@ -154,7 +187,7 @@ async def propose(
 ) -> tuple[list[Option], str]:
     """Shortlist from one shop. Returns the options and how they were chosen."""
     products = await catalog(merchant_url, merchant_id)
-    known = _build(products, merchant_id, merchant_name or merchant_id)
+    known = _build(products, merchant_id, merchant_name or merchant_id, merchant_url)
     if not known:
         return [], "that shop has nothing in it"
 
@@ -261,6 +294,9 @@ def _as_dict(option: Option) -> dict[str, Any]:
 
 
 def _as_dict_full(option: Option) -> dict[str, Any]:
+    """Every field, because both shortlist paths rebuild an Option from this to
+    attach `why`. A field missing here is a field silently dropped on the way to
+    the page -- which is how the product link went missing the first time."""
     return {
         "sku": option.sku,
         "name": option.name,
@@ -269,4 +305,5 @@ def _as_dict_full(option: Option) -> dict[str, Any]:
         "merchant_id": option.merchant_id,
         "merchant_name": option.merchant_name,
         "why": option.why,
+        "page_url": option.page_url,
     }

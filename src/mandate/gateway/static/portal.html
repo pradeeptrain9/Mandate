@@ -130,7 +130,17 @@ async function ask() {
     document.getElementById('options').innerHTML = body.options.map(o => `
       <div class="opt">
         <div class="row" style="justify-content:space-between">
-          <span class="name">${esc(o.name)}</span>
+          <span class="name">${o.page_url
+            // The merchant's own page, opened in its own tab. noopener because the
+            // page is a third party's -- in the demo one of them serves a product
+            // description written to manipulate whoever reads it -- and nothing
+            // from it is ever inlined into this page. The href is built and
+            // scheme-checked server-side by shopping.page_url; empty means the
+            // merchant URL was not something to send a browser to, and then the
+            // name is plain text rather than a link to nowhere.
+            ? `<a href="${esc(o.page_url)}" target="_blank" rel="noopener noreferrer"
+                 >${esc(o.name)}</a>`
+            : esc(o.name)}</span>
           <span class="price amount">${esc(o.price)} ${esc(o.currency)}</span>
         </div>
         ${o.why ? `<p class="why">${esc(o.why)}</p>` : ''}
