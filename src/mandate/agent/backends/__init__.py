@@ -25,6 +25,7 @@ __all__ = [
     "GeminiUnavailable",
     "choose",
     "configured_providers",
+    "provider_of",
 ]
 
 
@@ -38,14 +39,43 @@ def configured_providers() -> list[str]:
     return found
 
 
+#: A model name names its provider, so it is allowed to decide which one is used.
+PREFIXES: tuple[tuple[str, str], ...] = (
+    ("claude-", "claude"),
+    ("gemini-", "gemini"),
+)
+
+
+def provider_of(model: str) -> str | None:
+    """Which provider serves this model, by name. None if the name says nothing."""
+    name = (model or "").strip().lower()
+    for prefix, provider in PREFIXES:
+        if name.startswith(prefix):
+            return provider
+    return None
+
+
 def choose(provider: str | None = None, *, model: str | None = None) -> Backend:
     """Build a backend from the environment.
 
-    With no `provider`, takes `MANDATE_PROVIDER` if set, else the first provider
-    with a key. Raises with the exact variable to set when none is configured --
-    "no API key" is a useless error message when three would do.
+    Precedence, strongest first:
+
+      1. an explicit `provider` argument -- a caller that names one means it
+      2. the model's own name, when it identifies a provider
+      3. MANDATE_PROVIDER
+      4. the first provider with a key
+
+    The model name outranks MANDATE_PROVIDER because it has to. Asking for
+    `claude-haiku-4-5` while MANDATE_PROVIDER says gemini used to send that name
+    to Gemini, which answers 404, and the gateway's shortlist treats any failure
+    as "no model" and silently falls back to keyword matching. The result was a
+    shortlist that quietly got worse on exactly the machines that are set up
+    best -- both keys present, a provider pinned for the agent scenes -- and said
+    nothing about why. Nobody writes a Claude model name meaning Gemini.
     """
-    provider = (provider or os.environ.get("MANDATE_PROVIDER") or "").strip().lower()
+    explicit = (provider or "").strip().lower()
+    inferred = provider_of(model or "")
+    provider = explicit or inferred or (os.environ.get("MANDATE_PROVIDER") or "").strip().lower()
     available = configured_providers()
 
     if not provider:
@@ -57,6 +87,12 @@ def choose(provider: str | None = None, *, model: str | None = None) -> Backend:
                 "Then re-source .env."
             )
         provider = available[0]
+
+    if inferred and not explicit and provider != inferred:
+        # Unreachable through the precedence above, and asserted rather than
+        # trusted: the one bug this function has had was the model and the
+        # provider disagreeing without anyone noticing.
+        raise RuntimeError(f"model {model!r} is served by {inferred}, not {provider}")
 
     if provider == "gemini":
         key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
