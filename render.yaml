@@ -2,19 +2,35 @@
 # and the demo is less honest if it shares a process with the gateway that refuses
 # its baskets.
 #
-# Read the disk and the plan notes before deploying: on Render's free instance type
-# there is no persistent disk, so the ledger and the hold database are lost on every
-# restart and every deploy. That is survivable for a demo -- scripts/seed_demo.py
-# refills it -- but it is the opposite of what an append-only audit log is for, so
-# the disk below is attached to a paid instance and the free path is called out
-# rather than left to be discovered.
+# Free instance type, deliberately, and the cost of that is written down here rather
+# than discovered after a deploy.
+#
+# Render's free plan has no persistent disk. The ledger and the hold database live in
+# the container filesystem, so **both are lost on every deploy and on every spin-down**
+# -- and free services spin down after about 15 minutes of inactivity, which a judge
+# arriving cold will hit as a ~50s first request.
+#
+# MANDATE_LEDGER_KEY is generated per instance, so it is regenerated along with the
+# container. Records written before a restart will then report as signed by an unknown
+# key. That is the ledger telling the truth: it genuinely cannot verify them, and the
+# key id is written outside the signature precisely so a record cannot nominate a key
+# into existence. It is not a bug to be explained away on the demo URL.
+#
+# This is the opposite of what an append-only audit log is for. It is the right
+# trade for a hosted demo that must cost nothing, and the wrong one for anything else:
+# to make the ledger durable, set `plan: starter` on the gateway and restore the disk
+# block shown at the bottom of this file.
+#
+# After a restart, repopulate in one command:
+#   render shell mandate-gateway -> python scripts/seed_demo.py
+# or just hit the dashboard; an empty ledger renders as an empty table, not an error.
 
 services:
   - type: web
     name: mandate-merchant
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     region: oregon
     healthCheckPath: /merchants
     dockerCommand: sh -c "exec uvicorn mandate.merchant.app:app --host 0.0.0.0 --port $PORT"
@@ -33,13 +49,10 @@ services:
     name: mandate-gateway
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     region: oregon
     healthCheckPath: /health
-    disk:
-      name: ledger
-      mountPath: /var/lib/mandate
-      sizeGB: 1
+    # No `disk:` block -- the free plan cannot attach one. See the note at the top.
     envVars:
       - key: MANDATE_VAR_DIR
         value: /var/lib/mandate
@@ -82,3 +95,12 @@ services:
         sync: false
       - key: MANDATE_APPROVER_NUMBER
         sync: false
+
+# To make the ledger survive deploys, set `plan: starter` on mandate-gateway and add
+# this back under it. ~$7/mo for the instance; the disk itself is included at this
+# size. Nothing else in this file changes.
+#
+#     disk:
+#       name: ledger
+#       mountPath: /var/lib/mandate
+#       sizeGB: 1

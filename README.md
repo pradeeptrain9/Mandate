@@ -627,13 +627,20 @@ than a typo.
 carry the value", which is the only correct way to describe a secret in a committed file. They
 are entered in the dashboard.
 
-**The disk needs a paid instance, and that is a real constraint rather than an upsell.** Render's
-free instance type has no persistent disk, so the ledger and the hold database are lost on every
-restart and every deploy. `seed_demo.py` refills them, so a demo URL survives it — but an
-append-only audit log that vanishes on deploy is the opposite of the thing this project argues
-for, and it would be dishonest to ship a blueprint that quietly did that. If you deploy on the
-free tier anyway, know that `MANDATE_LEDGER_KEY` is regenerated with the instance, so records
-from before a restart will report as signed by an unknown key — correctly, since they were.
+**It deploys on the free plan, and the cost of that is in the file rather than discovered.**
+Render's free instance type has no persistent disk, so the ledger and the hold database live in
+the container filesystem and are lost on every deploy and every spin-down — and free services
+spin down after ~15 minutes idle, which a judge arriving cold meets as a ~50s first request.
+`MANDATE_LEDGER_KEY` is generated per instance, so it is regenerated too, and records written
+before a restart then report as signed by an unknown key. That is the ledger telling the truth:
+it genuinely cannot verify them, and the key id sits outside the signature precisely so a record
+cannot nominate a key into existence.
+
+This is the opposite of what an append-only audit log is for. It is the right trade for a hosted
+demo that must cost nothing and the wrong one for anything else, so `render.yaml` carries the
+disk block commented at the bottom: set `plan: starter` on the gateway and paste it back, and
+nothing else changes. After a restart, `python scripts/seed_demo.py` repopulates in seconds, and
+an empty ledger renders as an empty table rather than an error.
 
 After the first deploy, set `MANDATE_PUBLIC_URL` to the gateway's own URL. It is what the
 approval link points at and where PayPal returns the buyer; leaving it wrong produces approval
