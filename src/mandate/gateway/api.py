@@ -32,13 +32,15 @@ from pydantic import BaseModel, Field
 from ..delivery.carrier import AlwaysDelivers, MerchantCarrier, NeverDelivers
 from ..engine.money import Money
 from ..engine.policy import Outcome
-from ..ledger.codec import dec_quote
+from ..ledger.codec import dec_policy, dec_quote, enc_policy
 from ..ledger.records import Ledger, SignatureInvalid
 from ..policies import demo_policy
 from ..providers.paypal import LIVE, SANDBOX, PayPalClient
 from ..providers.toolkit import Toolkit
 from . import disputes as dispute_api
 from .approvals import build_approver
+from .policy_store import PolicyRejected, PolicyStore, validate
+from .policy_store import seed as seed_policy
 from .service import AuthorizationRequest, Gateway, GatewayError, WebhookRejected
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
@@ -48,6 +50,7 @@ from .sweep import sweep
 #: server runs is most of the work of building one, and a judge reading the repo can
 #: see the file rather than a string in a Python module.
 DASHBOARD = Path(__file__).parent / "static" / "dashboard.html"
+ADMIN = Path(__file__).parent / "static" / "admin.html"
 
 #: The bare URL returned 404, which on a hosted demo reads as "broken" rather than
 #: "this is an API". Small and inline rather than another file: it has no data in it
@@ -120,7 +123,7 @@ def build_gateway() -> Gateway:
         for part in os.environ.get("MANDATE_LEDGER_RETIRED_KEYS", "").split(",")
         if part.strip()
     ]
-    return Gateway(
+    gateway = Gateway(
         store=Store(var / "state.db"),
         ledger=Ledger(var / "decisions.jsonl", ledger_key.encode("utf-8"), retired_keys=retired),
         policy=demo_policy(),
@@ -142,6 +145,12 @@ def build_gateway() -> Gateway:
         if client_id and client_secret
         else None,
     )
+    # The rules become editable here. `seed` installs the bundled demo policy only
+    # when the table is empty -- an upsert would quietly undo an admin's work on
+    # every restart, at the moment nobody is watching.
+    gateway.policies = PolicyStore(gateway.store)
+    seed_policy(gateway.policies, demo_policy())
+    return gateway
 
 
 def gateway(request: Request) -> Gateway:
@@ -294,6 +303,185 @@ async def place_hold(decision_id: str, gw: Gateway = Depends(gateway)) -> dict:
 class RefundBody(BaseModel):
     amount: str = Field(default="", max_length=32)
     reason: str = Field(default="refunded by an operator", max_length=500)
+
+
+class PolicyBody(BaseModel):
+    """A whole policy, not a patch.
+
+    Deliberate: a partial update means the server merges, and a merge means two
+    admins editing different fields can produce a policy neither of them read. The
+    editor loads the current version, changes it, and sends all of it back.
+    """
+
+    policy: dict
+    author: str = Field(min_length=1, max_length=200)
+    note: str = Field(default="", max_length=500)
+
+
+@ops_router.get("/policy")
+def read_policy(gw: Gateway = Depends(gateway)) -> dict:
+    """The rules in force, plus who last changed them."""
+    current = gw.policies.current_version() if gw.policies else None
+    return {
+        "policy": enc_policy(gw.policy),
+        "version": current.version if current else None,
+        "author": current.author if current else None,
+        "note": current.note if current else "",
+        "updated_at": current.created_at.isoformat() if current else None,
+        "editable": gw.policies is not None,
+    }
+
+
+@ops_router.put("/policy")
+def write_policy(body: PolicyBody, gw: Gateway = Depends(gateway)) -> dict:
+    """Save a new version. Never overwrites: the old version stays readable.
+
+    Operator-only, like capture and void, and absent from /v1/agent/*. An agent
+    that could edit the policy would not need to defeat the policy.
+    """
+    if gw.policies is None:
+        raise HTTPException(409, "this gateway has no policy store; rules are fixed at startup")
+    try:
+        proposed = dec_policy(body.policy)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, f"that is not a policy: {exc}") from exc
+    try:
+        saved = gw.policies.save(proposed, author=body.author, note=body.note)
+    except PolicyRejected as exc:
+        # 422, not 400: the shape was understood and the content refused.
+        raise HTTPException(422, {"problems": exc.problems}) from exc
+    return {
+        "version": saved.version,
+        "author": saved.author,
+        "note": saved.note,
+        "updated_at": saved.created_at.isoformat(),
+        "policy": enc_policy(saved.policy),
+    }
+
+
+@ops_router.post("/policy/check")
+def check_policy(body: PolicyBody, gw: Gateway = Depends(gateway)) -> dict:
+    """Validate without saving, so the editor can object before an admin commits."""
+    try:
+        proposed = dec_policy(body.policy)
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"ok": False, "problems": [f"that is not a policy: {exc}"], "warnings": []}
+    from .policy_store import warnings as policy_warnings
+
+    problems = validate(proposed)
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "warnings": policy_warnings(gw.policy, proposed),
+    }
+
+
+@ops_router.get("/policy/history")
+def policy_history(limit: int = 50, gw: Gateway = Depends(gateway)) -> dict:
+    if gw.policies is None:
+        return {"versions": []}
+    return {
+        "versions": [
+            {
+                "version": v.version,
+                "policy_id": v.policy.policy_id,
+                "author": v.author,
+                "note": v.note,
+                "created_at": v.created_at.isoformat(),
+            }
+            for v in gw.policies.history(limit)
+        ]
+    }
+
+
+@ops_router.get("/policy/{version}")
+def policy_at(version: int, gw: Gateway = Depends(gateway)) -> dict:
+    """What the rules were then. The question people ask after something goes wrong."""
+    found = gw.policies.at_version(version) if gw.policies else None
+    if found is None:
+        raise HTTPException(404, f"no policy version {version}")
+    return {
+        "version": found.version,
+        "author": found.author,
+        "note": found.note,
+        "created_at": found.created_at.isoformat(),
+        "policy": enc_policy(found.policy),
+    }
+
+
+class VerdictBody(BaseModel):
+    approver: str = Field(min_length=1, max_length=200)
+    note: str = Field(default="", max_length=500)
+
+
+@ops_router.get("/approvals")
+def pending_approvals(gw: Gateway = Depends(gateway)) -> dict:
+    """What is waiting on a human, with enough to decide without leaving the page."""
+    waiting = gw.store.list(states=frozenset({HoldState.AWAITING_HUMAN}))
+    records = {r.decision_id: r for r in gw.ledger}
+    out = []
+    for hold in waiting:
+        record = records.get(hold.decision_id)
+        out.append(
+            {
+                **_hold_json(hold),
+                # Why a human is being asked, in the engine's own words. An
+                # approver shown only an amount is an approver guessing.
+                "reasons": [
+                    r.message
+                    for r in (record.evaluation.results if record else [])
+                    if r.outcome is not Outcome.ALLOW
+                ],
+                "items": [
+                    {"sku": i.sku, "quantity": i.quantity, "description": i.description}
+                    for i in (record.quote.line_items if record else [])
+                ],
+                "agent_reason": hold.agent_reason,
+                "agent_id": hold.agent_id,
+            }
+        )
+    return {"approvals": out}
+
+
+@ops_router.post("/approvals/{decision_id}/approve")
+async def approve_from_console(
+    decision_id: str, body: VerdictBody, gw: Gateway = Depends(gateway)
+) -> dict:
+    """Approve from the admin console rather than the SMS link.
+
+    Mints a token and spends it immediately. That keeps one approval path rather
+    than two: the same `approve` the link uses, with the same single-use token and
+    the same record of who said yes.
+    """
+    try:
+        link = gw.issue_approval_link(decision_id)
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    token = link.rsplit("/", 1)[1]
+    try:
+        result = await gw.approve(token, approver=body.approver)
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"hold": _hold_json(result.hold), "buyer_approval_url": result.approval_url}
+
+
+@ops_router.post("/approvals/{decision_id}/decline")
+def decline_from_console(
+    decision_id: str, body: VerdictBody, gw: Gateway = Depends(gateway)
+) -> dict:
+    try:
+        link = gw.issue_approval_link(decision_id)
+    except UnknownHold:
+        raise HTTPException(404, f"no decision {decision_id}") from None
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    token = link.rsplit("/", 1)[1]
+    try:
+        return {"hold": _hold_json(gw.decline(token, approver=body.approver))}
+    except GatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @ops_router.post("/holds/{decision_id}/refund")
@@ -691,6 +879,16 @@ button{{flex:1;padding:.85rem;font-size:1rem;font-weight:600;border-radius:10px;
 </form>
 <p class="muted">This link works once and expires shortly.</p>
 </body></html>"""
+
+
+@ops_router.get("/admin", response_class=HTMLResponse)
+def admin() -> str:
+    """Approvals queue and the rules editor.
+
+    Operator surface, like everything else under /v1/ops. The page can raise a
+    spending ceiling, so it has no business being reachable from /v1/agent/*.
+    """
+    return ADMIN.read_text(encoding="utf-8")
 
 
 @ops_router.get("/dashboard", response_class=HTMLResponse)

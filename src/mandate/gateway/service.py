@@ -40,6 +40,7 @@ from ..ledger.records import DecisionRecord, Ledger, build
 from ..providers.paypal import Authorization, PayPalClient, PayPalError, approval_link
 from ..providers.toolkit import Toolkit
 from .approvals import Approver, Notification
+from .policy_store import PolicyStore
 from .state import HoldState
 from .store import Hold, Store, UnknownHold
 from .webhooks import WebhookOutcome, event_id_of
@@ -137,7 +138,14 @@ class Gateway:
     ) -> None:
         self.store = store
         self.ledger = ledger
-        self.policy = policy
+        #: The policy this gateway was built with. Used only when no policy store is
+        #: attached -- tests construct a Gateway directly and should not need a
+        #: database row to decide anything.
+        self._fallback_policy = policy
+        #: Set by `build_gateway`. When present, every request reads the current
+        #: version from it, so an edit in the admin UI takes effect on the next
+        #: decision rather than the next deploy.
+        self.policies: PolicyStore | None = None
         self.merchant_secret = merchant_secret
         self.paypal = paypal
         self.public_url = public_url.rstrip("/")
@@ -149,6 +157,25 @@ class Gateway:
         #: link with issue_approval_link, so a judge can run the scene with no phone.
         self.approver = approver or Approver(None, "")
         self.toolkit = toolkit
+
+    @property
+    def policy(self) -> Policy:
+        """The rules in force right now.
+
+        Read per request rather than held, because rules are editable and an
+        operations team that has just lowered a cap should not have to wait for a
+        deploy to find out whether it worked.
+
+        This changes nothing about replay. Each decision record carries the full
+        policy it ran against rather than a reference to one, so a record written
+        under version 3 still replays under version 3 after version 4 is saved --
+        which is the only reason making the rules editable is safe at all.
+        """
+        if self.policies is not None:
+            live = self.policies.current()
+            if live is not None:
+                return live
+        return self._fallback_policy
 
     # -- the main path ---------------------------------------------------
 
@@ -187,6 +214,12 @@ class Gateway:
             state=HoldState.RECEIVED,
             at=moment,
             detail=f"evaluated against {self.policy.policy_id}",
+            # Recorded for humans, never read by the engine. `evaluate()` has no
+            # parameter that could receive either of these, which is the whole
+            # defence: the most likely place for an injected instruction to arrive
+            # is a free-text field, and this one is a dead end by construction.
+            agent_id=request.agent_id,
+            agent_reason=request.reason,
         )
         trace = "; ".join(record.evaluation.reason_ids) or "allowed by every rule"
 

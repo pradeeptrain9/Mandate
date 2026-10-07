@@ -71,7 +71,14 @@ CREATE TABLE IF NOT EXISTS holds (
     requested_at              TEXT NOT NULL,
     placed_at                 TEXT,
     updated_at                TEXT NOT NULL,
-    last_error                TEXT
+    last_error                TEXT,
+    -- What the agent said it was doing, and which agent. Recorded for humans and
+    -- never read by the engine: `evaluate()` has no parameter that could receive
+    -- either. Kept on the hold rather than in the signed decision record, because
+    -- adding a field to that payload would change its canonical JSON and
+    -- invalidate the signature of every record already written.
+    agent_id                  TEXT NOT NULL DEFAULT '',
+    agent_reason              TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS holds_by_state ON holds(state);
 CREATE INDEX IF NOT EXISTS holds_by_requested_at ON holds(requested_at);
@@ -90,6 +97,19 @@ CREATE INDEX IF NOT EXISTS hold_events_by_decision ON hold_events(decision_id);
 -- Webhook deliveries, so a replayed delivery cannot be processed twice. PayPal
 -- retries, and a retried PAYMENT.CAPTURE.COMPLETED must not look like a second
 -- capture.
+-- The live rules, versioned. Append-only like the ledger and for the same reason:
+-- "what were the limits in March" is a question asked after something goes wrong,
+-- and an UPDATE destroys the answer. Written here rather than by PolicyStore so one
+-- place defines the shape of this database. See gateway/policy_store.py.
+CREATE TABLE IF NOT EXISTS policies (
+    version     INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_id   TEXT NOT NULL,
+    document    TEXT NOT NULL,
+    author      TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS seen_webhooks (
     event_id   TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,
@@ -138,6 +158,8 @@ class Hold:
     approved_by: str | None = None
     placed_at: datetime | None = None
     last_error: str | None = None
+    agent_id: str = ""
+    agent_reason: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -173,6 +195,19 @@ class Store:
             self._connection.close()
 
     @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """The lock-guarded connection, for the other tables kept in this database.
+
+        Public because `PolicyStore` writes to the same file and must take the same
+        lock: SQLite is opened here with `check_same_thread=False`, which is only
+        safe because one re-entrant lock guards every statement. A second object
+        holding the raw connection and going around that lock would reintroduce
+        exactly the corruption the lock exists to prevent.
+        """
+        with self._tx() as db:
+            yield db
+
+    @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -203,6 +238,8 @@ class Store:
         state: HoldState,
         at: datetime | None = None,
         detail: str = "",
+        agent_id: str = "",
+        agent_reason: str = "",
     ) -> Hold:
         request = quote.to_policy_input()
         moment = at or _now()
@@ -211,8 +248,8 @@ class Store:
                 """INSERT INTO holds (
                        decision_id, state, policy_id, merchant_id, merchant_name, quote_id,
                        currency, amount_minor, fingerprint, categories, engine_outcome,
-                       requested_at, updated_at
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       requested_at, updated_at, agent_id, agent_reason
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     decision_id,
                     state.value,
@@ -227,6 +264,8 @@ class Store:
                     engine_outcome,
                     _iso(moment),
                     _iso(moment),
+                    agent_id,
+                    agent_reason,
                 ),
             )
             db.execute(
@@ -507,4 +546,6 @@ def _hold(row: sqlite3.Row) -> Hold:
         approved_by=row["approved_by"],
         placed_at=_dt(row["placed_at"]),
         last_error=row["last_error"],
+        agent_id=row["agent_id"] or "",
+        agent_reason=row["agent_reason"] or "",
     )

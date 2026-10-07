@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mandate — admin</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0d10;--panel:#11151b;--line:#1b212b;--fg:#e6e9ef;--dim:#8b93a3;
+  --accent:#7aa2f7;--allow:#9ece6a;--deny:#f7768e;--hold:#e0af68}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);padding:24px 16px 72px;
+  font:14px/1.55 ui-sans-serif,system-ui,-apple-system,sans-serif}
+main{max-width:1000px;margin:0 auto}
+h1{font-size:21px;margin:0}
+h2{font-size:15px;margin:32px 0 10px;color:var(--fg)}
+.sub{color:var(--dim);margin:2px 0 22px;font-size:13px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+label{display:block;color:var(--dim);font-size:12px;margin-bottom:4px}
+input,select{background:#0b0d10;color:var(--fg);border:1px solid var(--line);border-radius:6px;
+  padding:7px 9px;font:inherit;width:100%}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+.grid{display:grid;gap:12px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+button{background:var(--accent);color:#06080c;border:0;border-radius:6px;padding:9px 16px;
+  font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button.danger{background:var(--deny);color:#2a0b12}
+button.ok{background:var(--allow);color:#0d1a06}
+button:disabled{opacity:.45;cursor:not-allowed}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line);border-radius:999px;padding:5px 11px;cursor:pointer;
+  color:var(--dim);user-select:none;font-size:12px}
+.chip.on{border-color:var(--allow);color:var(--allow)}
+.chip.off{border-color:var(--deny);color:var(--deny)}
+table{width:100%;border-collapse:collapse}
+td,th{padding:7px 8px;border-top:1px solid var(--line);text-align:left;font-size:13px}
+th{color:var(--dim);font-weight:500;border-top:0}
+.msg{border-radius:8px;padding:11px 13px;margin-bottom:12px;font-size:13px;display:none}
+.msg.err{background:#2a0f16;border:1px solid var(--deny);color:#ffc9d2;display:block}
+.msg.warn{background:#2a220f;border:1px solid var(--hold);color:#f3dcae;display:block}
+.msg.good{background:#122113;border:1px solid var(--allow);color:#d2f0bd;display:block}
+.msg ul{margin:6px 0 0;padding-left:18px}
+.amount{font-variant-numeric:tabular-nums}
+.muted{color:var(--dim);font-size:12px}
+.pill{border-radius:999px;padding:2px 9px;font-size:11px;border:1px solid var(--line);color:var(--dim)}
+.empty{color:var(--dim);padding:14px 0;font-size:13px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Mandate — admin</h1>
+  <p class="sub">
+    Waiting approvals, and the rules every agent is held to.
+    <a href="/v1/ops/dashboard">Decision ledger →</a>
+  </p>
+
+  <h2>Waiting on a human</h2>
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+      <span class="muted">No order exists at PayPal and no funds are reserved until you decide.</span>
+      <input id="who" placeholder="your name or email" style="max-width:240px">
+    </div>
+    <div id="approvals"><div class="empty">Loading…</div></div>
+  </div>
+
+  <h2>Spending rules</h2>
+  <div id="policyMsg" class="msg"></div>
+  <div class="panel">
+    <div class="grid g3">
+      <div><label>Policy name</label><input id="policy_id"></div>
+      <div><label>Currency</label><input id="currency" maxlength="3"></div>
+      <div><label>Quotes expire after (minutes)</label><input id="quote_max_age" type="number" min="1"></div>
+    </div>
+    <div class="grid g2" style="margin-top:14px">
+      <div>
+        <label>Ask a human above this amount</label>
+        <input id="approval_threshold" type="number" step="0.01" min="0">
+        <div class="muted">Below this, the agent acts alone.</div>
+      </div>
+      <div>
+        <label>Refuse outright above this amount</label>
+        <input id="hard_cap" type="number" step="0.01" min="0">
+        <div class="muted">Nobody can approve this tier, not even you.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <label>Categories</label>
+    <div class="muted" style="margin-bottom:9px">
+      Click to cycle: allowed → refused → not mentioned.
+    </div>
+    <div id="cats" class="chips"></div>
+  </div>
+
+  <div class="panel">
+    <label>Budgets — at most this much in a rolling window</label>
+    <table id="envelopes"></table>
+    <button class="ghost" style="margin-top:10px" onclick="addEnvelope()">Add budget</button>
+  </div>
+
+  <div class="panel">
+    <label>Per-category ceilings</label>
+    <table id="catCaps"></table>
+    <button class="ghost" style="margin-top:10px" onclick="addCatCap()">Add ceiling</button>
+  </div>
+
+  <div class="panel">
+    <label>Suppliers</label>
+    <table id="merchants"></table>
+    <button class="ghost" style="margin-top:10px" onclick="addMerchant()">Add supplier</button>
+  </div>
+
+  <div class="panel">
+    <div class="grid g3">
+      <div><label>Max purchases per window</label><input id="velocity_limit" type="number" min="0"></div>
+      <div><label>That window (minutes)</label><input id="velocity_window" type="number" min="1"></div>
+      <div><label>Treat as duplicate within (minutes)</label><input id="duplicate_window" type="number" min="1"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="grid g2">
+      <div><label>Your name or email</label><input id="author" placeholder="required"></div>
+      <div><label>Why you are changing this</label><input id="note" placeholder="optional, but future-you will want it"></div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button onclick="save()">Save new version</button>
+      <button class="ghost" onclick="check()">Check without saving</button>
+      <button class="ghost" onclick="load()">Discard changes</button>
+      <span id="ver" class="muted"></span>
+    </div>
+  </div>
+
+  <h2>Change history</h2>
+  <div class="panel"><table id="history"></table></div>
+</main>
+
+<script>
+const CATEGORIES = ['office_supplies','compute','software_subscription','shipping','food',
+  'travel','hardware','professional_services','gift_card','crypto','cash_equivalent','other'];
+
+let policy = null;          // the live document, edited in place
+let catState = {};          // category -> 'allow' | 'deny' | 'none'
+
+const money = m => (m.minor / 100).toFixed(2);
+const toMoney = (v, cur) => ({ minor: Math.round(parseFloat(v || '0') * 100), currency: cur });
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// -- approvals --------------------------------------------------------------
+
+async function loadApprovals() {
+  const r = await fetch('/v1/ops/approvals').then(x => x.json());
+  const box = document.getElementById('approvals');
+  if (!r.approvals.length) {
+    box.innerHTML = '<div class="empty">Nothing is waiting.</div>';
+    return;
+  }
+  box.innerHTML = r.approvals.map(a => `
+    <div class="panel" style="margin:0 0 10px;background:#0d1117">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <strong class="amount">${esc(a.amount)} ${esc(a.currency)}</strong>
+          &nbsp;<span class="muted">at ${esc(a.merchant_name)}</span>
+        </div>
+        <span class="pill">${esc(a.requested_at.slice(0,16).replace('T',' '))} UTC</span>
+      </div>
+      ${a.items.length ? `<div class="muted" style="margin-top:6px">${
+        a.items.map(i => esc(i.quantity) + '×' + esc(i.sku)).join(', ')}</div>` : ''}
+      ${a.agent_reason ? `<div class="muted" style="margin-top:6px">
+        The agent said: &ldquo;${esc(a.agent_reason)}&rdquo;</div>` : ''}
+      ${a.reasons.length ? `<ul class="muted" style="margin:8px 0 0;padding-left:18px">${
+        a.reasons.map(x => '<li>' + esc(x) + '</li>').join('')}</ul>` : ''}
+      <div class="row" style="margin-top:12px">
+        <button class="ok" onclick="verdict('${esc(a.decision_id)}','approve')">Approve</button>
+        <button class="danger" onclick="verdict('${esc(a.decision_id)}','decline')">Decline</button>
+        <span class="muted">${esc(a.decision_id)}</span>
+      </div>
+    </div>`).join('');
+}
+
+async function verdict(id, what) {
+  const who = document.getElementById('who').value.trim();
+  if (!who) { alert('Put your name in first — an approval nobody signed is not an approval.'); return; }
+  const r = await fetch(`/v1/ops/approvals/${id}/${what}`, {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({ approver: who })
+  });
+  if (!r.ok) { alert((await r.json()).detail || 'that did not work'); return; }
+  loadApprovals();
+}
+
+// -- policy -----------------------------------------------------------------
+
+async function load() {
+  const r = await fetch('/v1/ops/policy').then(x => x.json());
+  policy = r.policy;
+  document.getElementById('ver').textContent = r.version
+    ? `version ${r.version} · ${r.author} · ${r.updated_at.slice(0,16).replace('T',' ')} UTC`
+    : 'not versioned (fixed at startup)';
+
+  document.getElementById('policy_id').value = policy.policy_id;
+  document.getElementById('currency').value = policy.currency;
+  document.getElementById('approval_threshold').value = money(policy.approval_threshold);
+  document.getElementById('hard_cap').value = money(policy.hard_per_transaction_cap);
+  document.getElementById('quote_max_age').value = Math.round(policy.quote_max_age_s / 60);
+  document.getElementById('velocity_limit').value = policy.velocity_limit;
+  document.getElementById('velocity_window').value = Math.round(policy.velocity_window_s / 60);
+  document.getElementById('duplicate_window').value = Math.round(policy.duplicate_window_s / 60);
+
+  catState = {};
+  CATEGORIES.forEach(c => catState[c] =
+    policy.denied_categories.includes(c) ? 'deny'
+    : policy.allowed_categories.includes(c) ? 'allow' : 'none');
+  drawCats();
+  drawEnvelopes();
+  drawCatCaps();
+  drawMerchants();
+  loadHistory();
+  document.getElementById('policyMsg').className = 'msg';
+}
+
+function drawCats() {
+  document.getElementById('cats').innerHTML = CATEGORIES.map(c => {
+    const st = catState[c];
+    return `<span class="chip ${st === 'allow' ? 'on' : st === 'deny' ? 'off' : ''}"
+      onclick="cycleCat('${c}')">${c.replace(/_/g,' ')}${
+        st === 'allow' ? ' ✓' : st === 'deny' ? ' ✕' : ''}</span>`;
+  }).join('');
+}
+function cycleCat(c) {
+  catState[c] = catState[c] === 'none' ? 'allow' : catState[c] === 'allow' ? 'deny' : 'none';
+  drawCats();
+}
+
+function drawEnvelopes() {
+  const t = document.getElementById('envelopes');
+  t.innerHTML = '<tr><th>Name</th><th>Window (hours)</th><th>Cap</th><th></th></tr>' +
+    policy.envelopes.map((e, i) => `<tr>
+      <td><input value="${esc(e.label)}" onchange="policy.envelopes[${i}].label=this.value"></td>
+      <td><input type="number" min="1" value="${e.duration_s/3600}"
+            onchange="policy.envelopes[${i}].duration_s=this.value*3600"></td>
+      <td><input type="number" step="0.01" value="${money(e.cap)}"
+            onchange="policy.envelopes[${i}].cap=toMoney(this.value, policy.currency)"></td>
+      <td><button class="ghost" onclick="policy.envelopes.splice(${i},1);drawEnvelopes()">Remove</button></td>
+    </tr>`).join('');
+}
+function addEnvelope() {
+  policy.envelopes.push({label:'new', duration_s:3600, cap:{minor:10000,currency:policy.currency}});
+  drawEnvelopes();
+}
+
+function drawCatCaps() {
+  const t = document.getElementById('catCaps');
+  t.innerHTML = '<tr><th>Category</th><th>Ceiling</th><th></th></tr>' +
+    policy.category_caps.map((c, i) => `<tr>
+      <td><select onchange="policy.category_caps[${i}][0]=this.value">${
+        CATEGORIES.map(x => `<option ${x===c[0]?'selected':''}>${x}</option>`).join('')}</select></td>
+      <td><input type="number" step="0.01" value="${money(c[1])}"
+            onchange="policy.category_caps[${i}][1]=toMoney(this.value, policy.currency)"></td>
+      <td><button class="ghost" onclick="policy.category_caps.splice(${i},1);drawCatCaps()">Remove</button></td>
+    </tr>`).join('');
+}
+function addCatCap() {
+  policy.category_caps.push(['office_supplies', {minor:10000, currency:policy.currency}]);
+  drawCatCaps();
+}
+
+function drawMerchants() {
+  const t = document.getElementById('merchants');
+  t.innerHTML = '<tr><th>Supplier id</th><th>Allowed</th><th>Cap (blank = none)</th><th></th></tr>' +
+    policy.merchants.map((m, i) => `<tr>
+      <td><input value="${esc(m.merchant_id)}" onchange="policy.merchants[${i}].merchant_id=this.value"></td>
+      <td><select onchange="policy.merchants[${i}].enabled=(this.value==='yes')">
+        <option value="yes" ${m.enabled?'selected':''}>yes</option>
+        <option value="no" ${!m.enabled?'selected':''}>no</option></select></td>
+      <td><input type="number" step="0.01" value="${m.per_transaction_cap ? money(m.per_transaction_cap) : ''}"
+            onchange="policy.merchants[${i}].per_transaction_cap = this.value
+              ? toMoney(this.value, policy.currency) : null"></td>
+      <td><button class="ghost" onclick="policy.merchants.splice(${i},1);drawMerchants()">Remove</button></td>
+    </tr>`).join('');
+}
+function addMerchant() {
+  policy.merchants.push({merchant_id:'m_new', enabled:true, per_transaction_cap:null});
+  drawMerchants();
+}
+
+function collect() {
+  const cur = document.getElementById('currency').value.trim().toUpperCase() || 'USD';
+  return {
+    ...policy,
+    policy_id: document.getElementById('policy_id').value.trim(),
+    currency: cur,
+    allowed_currencies: Array.from(new Set([...(policy.allowed_currencies||[]), cur])),
+    approval_threshold: toMoney(document.getElementById('approval_threshold').value, cur),
+    hard_per_transaction_cap: toMoney(document.getElementById('hard_cap').value, cur),
+    allowed_categories: CATEGORIES.filter(c => catState[c] === 'allow'),
+    denied_categories: CATEGORIES.filter(c => catState[c] === 'deny'),
+    quote_max_age_s: Math.round(document.getElementById('quote_max_age').value * 60),
+    velocity_limit: parseInt(document.getElementById('velocity_limit').value || '0', 10),
+    velocity_window_s: Math.round(document.getElementById('velocity_window').value * 60),
+    duplicate_window_s: Math.round(document.getElementById('duplicate_window').value * 60),
+  };
+}
+
+function show(kind, title, items) {
+  const box = document.getElementById('policyMsg');
+  box.className = 'msg ' + kind;
+  box.innerHTML = `<strong>${esc(title)}</strong>` +
+    (items && items.length ? '<ul>' + items.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>' : '');
+}
+
+async function check() {
+  const r = await fetch('/v1/ops/policy/check', {
+    method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({ policy: collect(), author: 'preview' })
+  }).then(x => x.json());
+  if (!r.ok) return show('err', 'This would be refused:', r.problems);
+  if (r.warnings.length) return show('warn', 'Allowed, but worth noticing:', r.warnings);
+  show('good', 'Valid, and nothing alarming changed.', []);
+}
+
+async function save() {
+  const author = document.getElementById('author').value.trim();
+  if (!author) return show('err', 'Who is making this change?',
+    ['A spending limit that can be raised anonymously is not a limit.']);
+  const r = await fetch('/v1/ops/policy', {
+    method: 'PUT', headers: {'content-type':'application/json'},
+    body: JSON.stringify({
+      policy: collect(), author,
+      note: document.getElementById('note').value.trim()
+    })
+  });
+  const body = await r.json();
+  if (!r.ok) {
+    const problems = (body.detail && body.detail.problems) || [body.detail || 'that did not work'];
+    return show('err', 'Not saved:', problems);
+  }
+  show('good', `Saved as version ${body.version}. In force from the next decision.`,
+    body.note ? [body.note] : []);
+  document.getElementById('note').value = '';
+  load();
+}
+
+async function loadHistory() {
+  const r = await fetch('/v1/ops/policy/history').then(x => x.json());
+  document.getElementById('history').innerHTML =
+    '<tr><th>Version</th><th>When</th><th>Who</th><th>Why</th></tr>' +
+    (r.versions.length ? r.versions.map(v => `<tr>
+      <td>${v.version}</td>
+      <td class="muted">${esc(v.created_at.slice(0,16).replace('T',' '))} UTC</td>
+      <td>${esc(v.author)}</td>
+      <td class="muted">${esc(v.note) || '—'}</td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty">No changes recorded.</td></tr>');
+}
+
+load();
+loadApprovals();
+setInterval(loadApprovals, 5000);
+</script>
+</body>
+</html>
