@@ -79,7 +79,7 @@ Week 1 of a five-week build for the PayPal × AI hackathon (deadline 2026-11-12)
 | `render.yaml` | **Done.** Blueprint for both services, with the free-tier disk caveat documented rather than hidden. |
 | `scripts/seed_demo.py` | **Done.** A month of history from nothing, produced by the real engine so every seeded record still replays. |
 
-441 tests pass. None of them need credentials or a network.
+443 tests pass. None of them need credentials or a network.
 
 ### What the sandbox spike established
 
@@ -202,7 +202,7 @@ should copy into anything.
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest          # 441 tests, no credentials, no network
+.venv/bin/python -m pytest          # 443 tests, no credentials, no network
 ./scripts/bootstrap_env.sh
 ./scripts/serve.sh                  # merchant and gateway, Ctrl-C stops both
 ```
@@ -589,6 +589,14 @@ So the model shortlists. It does not price and it does not buy.
 
 That is the rule the whole project runs on — the engine computes, the model explains — applied
 one layer earlier.
+
+**The shortlist is metered and capped on the same ledger as everything else.** It is the one
+place in this project a model can be invoked on every page load, and an uncapped one is how a
+budget disappears without anybody deciding to spend it. It also runs a deliberately cheap model
+by default — picking four items out of a short catalog is not a task that needs the most capable
+one, and defaulting to Opus would spend five times what the job is worth every time somebody
+types a sentence. Measured on a real request: **$0.0062** on Haiku 4.5 (599 tokens in, 1,128
+out). The same call on Opus would have been about five times that.
 
 **With no model configured, or a model that is down, it falls back to keyword matching and says
 so.** A person who asked for a dress should get a worse list, not an error page. The note is

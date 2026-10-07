@@ -29,6 +29,7 @@ flow, and "the shortlist is dumber" is a better failure than a blank page.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -37,6 +38,8 @@ import httpx
 
 from .agent.conversation import UserTurn
 from .engine.money import Money
+
+logger = logging.getLogger(__name__)
 
 SYSTEM = """You help someone choose what to buy from one shop's catalog.
 
@@ -140,6 +143,7 @@ async def propose(
     merchant_id: str = "m_thread",
     merchant_name: str = "",
     backend: Any = None,
+    spend: Any = None,
     limit: int = 4,
 ) -> tuple[list[Option], str]:
     """Shortlist from one shop. Returns the options and how they were chosen."""
@@ -162,6 +166,24 @@ async def propose(
     listing = "\n".join(
         f"- {p['sku']}: {p['name']} — {p.get('description', '')}" for p in products
     )
+    if spend is not None:
+        # Checked before the call, like every other model request in this project.
+        # Without this the portal is the one place a model can be invoked on every
+        # page load with no cap and no record -- which is how a budget disappears
+        # without anybody deciding to spend it.
+        try:
+            spend.check(model=getattr(backend, "model", "unknown"))
+        except Exception as exc:  # noqa: BLE001 - a spent budget is not an error page
+            options, _ = await propose(
+                need,
+                merchant_url=merchant_url,
+                merchant_id=merchant_id,
+                merchant_name=merchant_name,
+                backend=None,
+                limit=limit,
+            )
+            return options, f"keyword matches — {exc}"
+
     try:
         completion = await backend.complete(
             system=SYSTEM,
@@ -186,6 +208,16 @@ async def propose(
         # looking for a network problem.
         detail = " ".join(str(exc).split())[:160] or type(exc).__name__
         return options, f"the model did not answer, so these are keyword matches — {detail}"
+    if spend is not None and getattr(completion, "usage", None) is not None:
+        try:
+            spend.record(
+                model=getattr(backend, "model", "unknown"),
+                usage=completion.usage,
+                label="shortlist",
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping must not fail the request
+            logger.warning("could not record shortlist spend")
+
     picks = _extract(completion.text or "")
 
     options: list[Option] = []

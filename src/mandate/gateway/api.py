@@ -227,7 +227,15 @@ def build_gateway() -> Gateway:
         from ..agent.backends import choose
         from ..agent.backends.gemini import GeminiBackend
 
-        backend = choose()
+        # A cheap model on purpose. Shortlisting four items from a short catalog is
+        # not a task that needs the most capable model available, and the gateway
+        # defaulting to one would quietly spend five times what the job is worth on
+        # every page load. Overridable, because somebody with a large catalog and a
+        # budget may reasonably disagree.
+        shopping_model = os.environ.get("MANDATE_SHOPPING_MODEL", "").strip() or None
+        if shopping_model is None and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            shopping_model = "claude-haiku-4-5-20251001"
+        backend = choose(model=shopping_model) if shopping_model else choose()
         if isinstance(backend, GeminiBackend):
             # A much tighter budget than the agent loop gets, because this is a
             # person waiting on a page rather than a scene running unattended. The
@@ -252,6 +260,15 @@ def build_gateway() -> Gateway:
                 rpm=0,
             )
         gateway.shopping_backend = backend
+        # The same ledger and the same cap the agent scenes use, so portal spend
+        # and scene spend are one number rather than two that have to be added up
+        # by whoever is paying.
+        from ..agent.budget import SpendLedger
+
+        gateway.shopping_spend = SpendLedger(
+            path=var / "llm_spend.jsonl",
+            cap_usd=float(os.environ.get("MANDATE_LLM_CAP_USD", "5.00")),
+        )
     except Exception as exc:  # noqa: BLE001 - shopping must not stop the gateway booting
         logger.info("no model for shortlisting: %s", exc)
     return gateway
@@ -460,6 +477,7 @@ async def shortlist(
             merchant_id=body.merchant_id,
             merchant_name="",
             backend=gw.shopping_backend,
+            spend=getattr(gw, "shopping_spend", None),
         )
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"could not reach the shop: {exc}") from exc

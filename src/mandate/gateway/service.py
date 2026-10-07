@@ -160,6 +160,8 @@ class Gateway:
         self.toolkit = toolkit
         #: Used only to shortlist things to buy. Never consulted about money.
         self.shopping_backend: Any = None
+        #: Caps and records what shortlisting costs, on the same ledger as the scenes.
+        self.shopping_spend: Any = None
 
     @property
     def policy(self) -> Policy:

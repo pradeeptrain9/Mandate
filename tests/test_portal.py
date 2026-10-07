@@ -365,3 +365,58 @@ async def test_nonsense_from_the_model_falls_back_rather_than_showing_nothing(mo
     )
     assert len(options) == 2
     assert "keyword" in how
+
+
+async def test_the_shortlist_is_capped_like_everything_else(monkeypatch, tmp_path):
+    """The portal is the one place a model can be invoked on every page load.
+    Without a cap that is how a budget disappears with nobody deciding to spend it."""
+    from mandate import shopping
+    from mandate.agent.budget import SpendLedger
+
+    async def fake_catalog(url, mid):
+        return CATALOG
+
+    monkeypatch.setattr(shopping, "catalog", fake_catalog)
+    spent = SpendLedger(path=tmp_path / "spend.jsonl", cap_usd=0.0)
+    backend = FakeBackend('{"options": [{"sku": "SKU-A", "why": "no"}]}')
+    options, how = await shopping.propose(
+        "dress", merchant_url="x", backend=backend, spend=spent
+    )
+    # Falls back rather than erroring, and says why.
+    assert len(options) == 2
+    assert "cap reached" in how
+
+
+async def test_what_the_shortlist_cost_is_recorded(monkeypatch, tmp_path):
+    from mandate import shopping
+    from mandate.agent.budget import SpendLedger
+
+    async def fake_catalog(url, mid):
+        return CATALOG
+
+    monkeypatch.setattr(shopping, "catalog", fake_catalog)
+
+    class Metered(FakeBackend):
+        model = "claude-haiku-4-5"
+
+        async def complete(self, *, system, turns, tools):
+            return type(
+                "C",
+                (),
+                {
+                    "text": self.text,
+                    "calls": [],
+                    "usage": {"input_tokens": 1000, "output_tokens": 200},
+                },
+            )()
+
+    spent = SpendLedger(path=tmp_path / "spend.jsonl", cap_usd=5.0)
+    await shopping.propose(
+        "dress",
+        merchant_url="x",
+        backend=Metered('{"options": [{"sku": "SKU-A", "why": "fits"}]}'),
+        spend=spent,
+    )
+    assert spent.calls == 1
+    # 1000 in at $1/MTok + 200 out at $5/MTok.
+    assert spent.spent_usd == pytest.approx(0.002, abs=1e-6)
