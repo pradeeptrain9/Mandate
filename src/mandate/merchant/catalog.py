@@ -158,14 +158,42 @@ GHOST = Merchant(
 )
 
 #: A clothing retailer, for the scenario where the person asking is not an
-#: operations team buying toner but someone who wants something to wear. Sizes and
-#: fit notes are in the description on purpose: it is the field an agent has to read
-#: to be useful, and the field an attacker would write into. The firewall never
-#: reads it either way.
+#: operations team buying toner but someone who wants something to wear.
+#:
+#: Deep enough that a shortlist has to actually discriminate. Ask for "something
+#: for an office party, I am 160 cm" and most of this catalog is wrong for a
+#: reason stated only in the description -- ankle length cut for 168 cm and above,
+#: a blazer cropped for a shorter frame, a heel someone has to stand in all
+#: evening. That field is the one an agent must read to be useful and the one an
+#: attacker would write into, and the firewall never reads it either way.
+#:
+#: The prices are not arbitrary. Against the demo policy -- ask a human over $100,
+#: $200 per-category ceiling on clothing, $300 cap for this merchant, $500 refused
+#: outright -- they are spread so each rule gets something that trips only it:
+#:
+#:   under $100   the agent buys alone, no human involved      15 items
+#:   $100-$200    over the threshold, parks for approval         8 items
+#:   $200-$300    refused by the clothing ceiling and the
+#:                hourly envelope, merchant cap untouched        3 items
+#:   over $500    the hard cap, plus five other rules: nobody
+#:                can approve it, not even an admin who
+#:                raises every other limit                       1 item
+#:
+#: Checked against the engine rather than worked out by hand, which is how the
+#: $200-$300 line came to mention the hourly envelope: those three trip the
+#: clothing ceiling *and* the $200/hour envelope at once, and claiming the
+#: ceiling acted alone would have been a nice sentence about the wrong trace.
+#:
+#: Nothing single costs between $300 and $500, and nothing can: the clothing
+#: ceiling is $200, so any one garment above it is already refused before the
+#: merchant cap is consulted. That tier is reached by basket -- two camel coats
+#: come to $496 and add merchant_cap to the trace -- which is the honest shape of
+#: the policy rather than a product priced to make a slide work.
 THREAD = Merchant(
     merchant_id="m_thread",
     name="Thread & Co",
     products=(
+        # -- dresses -------------------------------------------------------
         Product(
             "SKU-DRESS-NAVY-S",
             "Navy wrap dress, size S",
@@ -183,14 +211,6 @@ THREAD = Merchant(
             "89.00",
         ),
         Product(
-            "SKU-DRESS-EMER-S",
-            "Emerald satin dress, size S",
-            "Ankle length, designed for 168 cm and above -- it will pool at the "
-            "hem on anyone shorter unless taken up. Sleeveless.",
-            Category.CLOTHING,
-            "145.00",
-        ),
-        Product(
             "SKU-DRESS-BLACK-S",
             "Black crepe shift dress, size S",
             "Knee length on most people between 155 and 170 cm. Short sleeves, "
@@ -199,12 +219,128 @@ THREAD = Merchant(
             "72.00",
         ),
         Product(
+            "SKU-DRESS-BLACK-M",
+            "Black crepe shift dress, size M",
+            "Knee length on most people between 155 and 170 cm. Short sleeves, "
+            "pockets, machine washable. The safe choice for a work event.",
+            Category.CLOTHING,
+            "72.00",
+        ),
+        Product(
+            "SKU-DRESS-EMER-S",
+            "Emerald satin dress, size S",
+            "Ankle length, designed for 168 cm and above -- it will pool at the "
+            "hem on anyone shorter unless taken up. Sleeveless.",
+            Category.CLOTHING,
+            "145.00",
+        ),
+        Product(
+            "SKU-DRESS-RUST-S",
+            "Rust linen shirt dress, size S",
+            "Mid-calf, belted. Creases by design. Daytime rather than evening.",
+            Category.CLOTHING,
+            "96.00",
+        ),
+        Product(
+            "SKU-DRESS-PLEAT-S",
+            "Pleated charcoal midi dress, size S",
+            "Hem sits mid-calf at 160 cm and lower. Long sleeves, high neck. "
+            "Holds a press through a long evening.",
+            Category.CLOTHING,
+            "128.00",
+        ),
+        Product(
+            "SKU-DRESS-VELVET-S",
+            "Midnight velvet cocktail dress, size S",
+            "Knee length, structured shoulder, concealed zip. Dry clean only. "
+            "Cut short in the body, which suits 155 to 165 cm.",
+            Category.CLOTHING,
+            "215.00",
+        ),
+        # -- tops and knitwear ---------------------------------------------
+        Product(
+            "SKU-TOP-SILK-S",
+            "Ivory silk camisole, size S",
+            "Bias cut, straight hem. Layers under a blazer or on its own.",
+            Category.CLOTHING,
+            "58.00",
+        ),
+        Product(
+            "SKU-TOP-POPLIN-S",
+            "White cotton poplin shirt, size S",
+            "Boxy fit, French cuffs. Sleeves run long below 160 cm.",
+            Category.CLOTHING,
+            "66.00",
+        ),
+        Product(
+            "SKU-KNIT-MERINO-S",
+            "Merino crew-neck jumper, size S",
+            "Fine gauge, charcoal. Machine washable on wool. Not an evening piece.",
+            Category.CLOTHING,
+            "84.00",
+        ),
+        Product(
+            "SKU-KNIT-CASH-S",
+            "Cashmere cardigan, size S",
+            "Two-ply, oversized, shell buttons. Warm enough to replace a coat indoors.",
+            Category.CLOTHING,
+            "189.00",
+        ),
+        # -- trousers and skirts -------------------------------------------
+        Product(
+            "SKU-TROUSER-WIDE-S",
+            "Wide-leg wool trousers, size S",
+            "High waist, unfinished hem -- sold long and meant to be taken up. "
+            "Falls to the floor at 170 cm.",
+            Category.CLOTHING,
+            "112.00",
+        ),
+        Product(
+            "SKU-TROUSER-TAPER-S",
+            "Tapered twill trousers, size S",
+            "Cropped at the ankle on most people up to 165 cm. Side pockets, no pleat.",
+            Category.CLOTHING,
+            "78.00",
+        ),
+        Product(
+            "SKU-SKIRT-SATIN-S",
+            "Pewter satin slip skirt, size S",
+            "Bias cut, mid-calf at 160 cm. Pairs with the silk camisole for an "
+            "evening without committing to a dress.",
+            Category.CLOTHING,
+            "74.00",
+        ),
+        # -- outerwear and tailoring ---------------------------------------
+        Product(
             "SKU-BLAZER-NAVY-S",
             "Navy tailored blazer, size S",
             "Cropped at the hip, cut for a shorter frame. Pairs with either dress.",
             Category.CLOTHING,
             "118.00",
         ),
+        Product(
+            "SKU-BLAZER-CREAM-M",
+            "Cream double-breasted blazer, size M",
+            "Longline, past the hip. Overwhelms a frame under 160 cm.",
+            Category.CLOTHING,
+            "165.00",
+        ),
+        Product(
+            "SKU-COAT-WOOL-S",
+            "Camel wool overcoat, size S",
+            "Knee length at 165 cm, below the knee shorter than that. "
+            "Fully lined, horn buttons.",
+            Category.CLOTHING,
+            "248.00",
+        ),
+        Product(
+            "SKU-COAT-TRENCH-S",
+            "Stone cotton trench coat, size S",
+            "Belted, storm flap, removable lining. Mid-calf under 160 cm.",
+            Category.CLOTHING,
+            "198.00",
+        ),
+        # -- shoes ---------------------------------------------------------
         Product(
             "SKU-SHOES-BLK-38",
             "Black block-heel shoes, EU 38",
@@ -213,6 +349,51 @@ THREAD = Merchant(
             Category.CLOTHING,
             "64.00",
         ),
+        Product(
+            "SKU-SHOES-BLK-39",
+            "Black block-heel shoes, EU 39",
+            "Five-centimetre block heel, suede. Comfortable enough to stand in "
+            "for an evening.",
+            Category.CLOTHING,
+            "64.00",
+        ),
+        Product(
+            "SKU-SHOES-STILE-38",
+            "Patent stiletto court shoes, EU 38",
+            "Nine-centimetre heel, unpadded sole. Not for an evening spent standing.",
+            Category.CLOTHING,
+            "132.00",
+        ),
+        Product(
+            "SKU-SHOES-LOAF-38",
+            "Leather penny loafers, EU 38",
+            "Flat, leather sole, needs breaking in. Daytime.",
+            Category.CLOTHING,
+            "98.00",
+        ),
+        # -- accessories ---------------------------------------------------
+        Product(
+            "SKU-BAG-CLUTCH",
+            "Satin box clutch",
+            "Holds a phone and a card and nothing else. Chain strap tucks inside.",
+            Category.CLOTHING,
+            "54.00",
+        ),
+        Product(
+            "SKU-BAG-TOTE",
+            "Pebbled leather tote",
+            "Fits a 14-inch laptop. Unlined, so it marks.",
+            Category.CLOTHING,
+            "225.00",
+        ),
+        Product(
+            "SKU-SCARF-SILK",
+            "Printed silk scarf, 90cm square",
+            "Hand-rolled edge. The usual present when nothing else fits.",
+            Category.CLOTHING,
+            "68.00",
+        ),
+        # -- the one that cannot be bought at all --------------------------
         Product(
             "SKU-GOWN-COUTURE",
             "Couture silk gown, made to order",
