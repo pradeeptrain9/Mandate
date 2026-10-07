@@ -1231,6 +1231,100 @@ async def decide(token: str, request: Request, gw: Gateway = Depends(gateway)) -
     raise HTTPException(400, "verdict must be approve or decline")
 
 
+@buyer_router.get("/buyer/return/{decision_id}", response_class=HTMLResponse)
+async def buyer_returned(
+    decision_id: str, token: str = "", gw: Gateway = Depends(gateway)
+) -> str:
+    """Where PayPal sends the buyer after they press Pay Now.
+
+    This is the `return_url` on every order this gateway creates, so it has to
+    exist whether or not webhooks are configured -- without it the buyer's last
+    step is a 404, which reads as a failed payment even though the approval
+    went through.
+
+    Not signed in, deliberately: the person approving at PayPal is the account
+    holder, who may not be the person who asked for the thing. The check that
+    matters instead is `token`, which PayPal appends and which must be the order
+    id this gateway recorded for this decision. Guessing a decision id is not
+    enough, and in any case the authorization below only succeeds for an order
+    PayPal itself has marked approved.
+
+    Reserving the funds here duplicates what CHECKOUT.ORDER.APPROVED does, on
+    purpose: the webhook is the path for a buyer who closes the tab, and this is
+    the path for one who does not. `place_hold` is serialized per decision, so
+    whichever arrives second finds the hold already held and says so.
+    """
+    try:
+        hold = gw.store.get(decision_id)
+    except UnknownHold as exc:
+        raise HTTPException(404, "no such order") from exc
+    if token and hold.paypal_order_id and token != hold.paypal_order_id:
+        raise HTTPException(400, "this link does not match the order it names")
+
+    if hold.state is HoldState.AWAITING_BUYER:
+        try:
+            hold = await gw.place_hold(decision_id)
+        except GatewayError as exc:
+            # Either the race was lost -- in which case the hold is already held
+            # and the state below is the truth -- or PayPal refused, which
+            # place_hold has already recorded. Re-read rather than guess.
+            logger.info("buyer return could not place %s: %s", decision_id, exc)
+            hold = gw.store.get(decision_id)
+
+    return _buyer_page(hold)
+
+
+@buyer_router.get("/buyer/cancel/{decision_id}", response_class=HTMLResponse)
+def buyer_cancelled_page(
+    decision_id: str, token: str = "", gw: Gateway = Depends(gateway)
+) -> str:
+    """The buyer backed out at PayPal. The `cancel_url` of every order."""
+    try:
+        hold = gw.store.get(decision_id)
+    except UnknownHold as exc:
+        raise HTTPException(404, "no such order") from exc
+    if token and hold.paypal_order_id and token != hold.paypal_order_id:
+        raise HTTPException(400, "this link does not match the order it names")
+    if hold.state is HoldState.AWAITING_BUYER:
+        hold = gw.buyer_cancelled(decision_id)
+    return _buyer_page(hold)
+
+
+def _buyer_page(hold: Hold) -> str:
+    """What the buyer sees on the way back from PayPal.
+
+    Says which state the hold is actually in rather than announcing success,
+    because "held" and "could not complete" both arrive at this URL and the
+    difference is the entire point of the product.
+    """
+    title, detail = portal_api.STATUS.get(
+        hold.state.value, (hold.state.value.replace("_", " "), "")
+    )
+    extra = (
+        f"<p class=err>{_escape(hold.last_error)}</p>"
+        if hold.state is HoldState.FAILED and hold.last_error
+        else ""
+    )
+    return (
+        "<!doctype html><html lang=en><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>{_escape(title)} &middot; Mandate</title>"
+        "<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:3rem 1.5rem;"
+        "max-width:30rem;margin-inline:auto;text-align:center}"
+        "h1{font-size:1.5rem;margin-bottom:.25rem}.amount{font-size:2rem;font-weight:600}"
+        ".muted{opacity:.7}.err{color:#b00020;font-size:.9rem}"
+        "a{display:inline-block;margin-top:2rem}</style></head><body>"
+        f"<h1>{_escape(title)}</h1>"
+        f"<p class=muted>{_escape(detail)}</p>"
+        f"<p class=amount>{hold.amount.to_paypal()} {hold.amount.currency}</p>"
+        f"<p class=muted>{_escape(hold.merchant_name)}</p>"
+        f"{extra}"
+        f"<p class=muted>Decision {_escape(hold.decision_id)}</p>"
+        '<a href="/app">Back to your requests</a>'
+        "</body></html>"
+    )
+
+
 def _done(title: str, detail: str) -> str:
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"

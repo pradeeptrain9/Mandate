@@ -29,7 +29,9 @@ what permitted it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -162,6 +164,15 @@ class Gateway:
         self.shopping_backend: Any = None
         #: Caps and records what shortlisting costs, on the same ledger as the scenes.
         self.shopping_spend: Any = None
+        #: One lock per decision, so `place_hold` is check-then-act atomically.
+        #: Two things race to authorize the same order: PayPal's
+        #: CHECKOUT.ORDER.APPROVED webhook and the buyer landing back on
+        #: /buyer/return. Without this, both can read AWAITING_BUYER, both call
+        #: PayPal, and the loser's error moves a perfectly good hold to FAILED.
+        #: In-process is enough and is honest about it: one container, and if
+        #: that ever stops being true this degrades to the race it replaced
+        #: rather than to silent corruption.
+        self._placing: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     @property
     def policy(self) -> Policy:
@@ -357,27 +368,51 @@ class Gateway:
     # -- the hold lifecycle ----------------------------------------------
 
     async def place_hold(self, decision_id: str, *, now: datetime | None = None) -> Hold:
-        """Authorize the approved order: funds reserved, not taken."""
+        """Authorize the approved order: funds reserved, not taken.
+
+        Serialized per decision. The state check and the PayPal call have to be
+        one step, because the webhook and the returning buyer both arrive saying
+        the same order was approved; see `_placing`.
+        """
         moment = now or datetime.now(UTC)
+        async with self._placing[decision_id]:
+            hold = self.store.get(decision_id)
+            if hold.state is not HoldState.AWAITING_BUYER:
+                raise GatewayError(f"{decision_id} is {hold.state.value}, not awaiting the buyer")
+            if self.paypal is None or not hold.paypal_order_id:
+                raise GatewayError("no PayPal order to authorize")
+            try:
+                auth: Authorization = await self.paypal.authorize_order(hold.paypal_order_id)
+            except PayPalError as exc:
+                self.store.transition(
+                    decision_id, HoldState.FAILED, detail=str(exc), at=moment, last_error=str(exc)
+                )
+                raise GatewayError(f"authorize failed: {exc}") from exc
+            return self.store.transition(
+                decision_id,
+                HoldState.HELD,
+                detail=f"authorization {auth.authorization_id} "
+                f"({auth.amount_value} {auth.currency})",
+                at=moment,
+                authorization_id=auth.authorization_id,
+                authorization_expires_at=auth.expires_at,
+            )
+
+    def buyer_cancelled(self, decision_id: str, *, now: datetime | None = None) -> Hold:
+        """The buyer backed out at PayPal. Terminal, and nothing to void.
+
+        PayPal creates no authorization for an order the buyer never approved, so
+        there is no money anywhere to release -- recording the refusal is the
+        whole action, exactly as it is for `decline`.
+        """
         hold = self.store.get(decision_id)
         if hold.state is not HoldState.AWAITING_BUYER:
             raise GatewayError(f"{decision_id} is {hold.state.value}, not awaiting the buyer")
-        if self.paypal is None or not hold.paypal_order_id:
-            raise GatewayError("no PayPal order to authorize")
-        try:
-            auth: Authorization = await self.paypal.authorize_order(hold.paypal_order_id)
-        except PayPalError as exc:
-            self.store.transition(
-                decision_id, HoldState.FAILED, detail=str(exc), at=moment, last_error=str(exc)
-            )
-            raise GatewayError(f"authorize failed: {exc}") from exc
         return self.store.transition(
             decision_id,
-            HoldState.HELD,
-            detail=f"authorization {auth.authorization_id} ({auth.amount_value} {auth.currency})",
-            at=moment,
-            authorization_id=auth.authorization_id,
-            authorization_expires_at=auth.expires_at,
+            HoldState.BUYER_CANCELLED,
+            detail="the buyer cancelled at PayPal",
+            at=now or datetime.now(UTC),
         )
 
     async def capture(

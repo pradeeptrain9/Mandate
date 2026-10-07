@@ -67,6 +67,7 @@ STATUS: dict[str, tuple[str, str]] = {
     "awaiting_human": ("Waiting for approval", "Someone has to say yes before anything is reserved."),
     "declined_by_human": ("Declined", "A person declined this. Nothing was charged."),
     "awaiting_buyer": ("Ready to pay", "Approved. Confirm at PayPal to reserve the money."),
+    "buyer_cancelled": ("Cancelled", "You cancelled at PayPal. Nothing was charged."),
     "held": ("Money held", "Reserved at PayPal, not taken. It is released if nothing arrives."),
     "captured": ("Paid", "The money has moved."),
     "voided": ("Released", "The hold was released. Nothing was taken."),

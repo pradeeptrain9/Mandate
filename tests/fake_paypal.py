@@ -65,6 +65,12 @@ class FakePayPal:
         #: Bodies the verifier was asked about, so a test can assert the raw signed
         #: bytes were spliced in rather than reserialised.
         self.verified_bodies: list[bytes] = []
+        #: The return_url and cancel_url the gateway asked PayPal to send the buyer
+        #: to, per order. Recorded because they are URLs on the gateway's own host
+        #: that nothing else in the suite visits: a test can take the value the
+        #: gateway really sent and assert the gateway serves it.
+        self.return_urls: dict[str, str] = {}
+        self.cancel_urls: dict[str, str] = {}
         self._counter = 0
 
     # -- test controls ---------------------------------------------------
@@ -144,6 +150,9 @@ class FakePayPal:
             decision_id=unit.get("custom_id", ""),
         )
         self.orders[order.order_id] = order
+        context = body.get("payment_source", {}).get("paypal", {}).get("experience_context", {})
+        self.return_urls[order.order_id] = context.get("return_url", "")
+        self.cancel_urls[order.order_id] = context.get("cancel_url", "")
         return httpx.Response(
             201,
             json={
