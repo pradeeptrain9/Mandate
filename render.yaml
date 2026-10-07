@@ -33,8 +33,12 @@ services:
     plan: free
     region: oregon
     healthCheckPath: /merchants
-    dockerCommand: sh -c "exec uvicorn mandate.merchant.app:app --host 0.0.0.0 --port $PORT"
     envVars:
+      # Not a dockerCommand. The image picks its service from this, so nothing
+      # depends on how Render tokenises an embedded shell command -- which is what
+      # made this the only service that failed to deploy.
+      - key: MANDATE_SERVICE
+        value: merchant
       # The same value the gateway holds. `fromService` rather than two copies of
       # a generated secret, because a merchant and a gateway that disagree about
       # the signing key fail with "signature invalid" on every quote, which reads
@@ -54,6 +58,8 @@ services:
     healthCheckPath: /health
     # No `disk:` block -- the free plan cannot attach one. See the note at the top.
     envVars:
+      - key: MANDATE_SERVICE
+        value: gateway
       - key: MANDATE_VAR_DIR
         value: /var/lib/mandate
       # Generated once by Render and then never changed by it. Rotating this means

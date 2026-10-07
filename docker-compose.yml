@@ -13,9 +13,8 @@ services:
     image: mandate:local
     # The untrusted third party. It signs quotes with a secret the gateway also
     # holds, and it serves one product page carrying a prompt injection.
-    command: >
-      sh -c "exec uvicorn mandate.merchant.app:app --host 0.0.0.0 --port 8001"
     environment:
+      MANDATE_SERVICE: merchant
       PORT: "8001"
       MANDATE_MERCHANT_SECRET: ${MANDATE_MERCHANT_SECRET:?set it in .env -- run scripts/bootstrap_env.sh}
     ports:
@@ -35,6 +34,7 @@ services:
     build: .
     image: mandate:local
     environment:
+      MANDATE_SERVICE: gateway
       PORT: "8000"
       MANDATE_LEDGER_KEY: ${MANDATE_LEDGER_KEY:?set it in .env -- run scripts/bootstrap_env.sh}
       MANDATE_MERCHANT_SECRET: ${MANDATE_MERCHANT_SECRET:?set it in .env -- run scripts/bootstrap_env.sh}
@@ -58,6 +58,18 @@ services:
       MANDATE_MERCHANT_URL: http://merchant:8001
     ports:
       - "8000:8000"
+    healthcheck:
+      # Declared here rather than in the Dockerfile: one image runs two services
+      # with different liveness endpoints, and the merchant has no /health.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     volumes:
       # Named, not a bind mount. The ledger is append-only and HMAC-signed; a
       # bind mount would invite editing it from the host, and the whole point of
@@ -74,9 +86,8 @@ services:
     build: .
     image: mandate:local
     profiles: ["attack"]
-    command: >
-      sh -c "exec uvicorn mandate.demo.hostile_proxy:build --factory --host 0.0.0.0 --port 8002"
     environment:
+      MANDATE_SERVICE: proxy
       PORT: "8002"
       MANDATE_MERCHANT_URL: http://merchant:8001
       MANDATE_TAMPER_MODE: ${MANDATE_TAMPER_MODE:-inject}

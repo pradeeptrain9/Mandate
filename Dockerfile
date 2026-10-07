@@ -42,18 +42,24 @@ VOLUME ["/var/lib/mandate"]
 # Scripts are not part of the installed package -- they are operator tools, and
 # the seed script is one of them.
 COPY --chown=mandate:mandate scripts /app/scripts
+COPY --chown=mandate:mandate docker-entrypoint.sh /app/docker-entrypoint.sh
 WORKDIR /app
 
 USER mandate
 EXPOSE 8000
 
-# No curl in slim, and adding it to run a health check would be a larger attack
-# surface than the check is worth.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
-  CMD python -c "import os,urllib.request,sys; \
-port=os.environ.get('PORT','8000'); \
-sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2).status == 200 else 1)"
+# No HEALTHCHECK here, on purpose. One image runs two services with different
+# liveness endpoints -- the gateway serves /health and the merchant does not -- so
+# a single baked-in probe is wrong for whichever service it was not written for.
+# It probed /health and the merchant 404'd on every interval, reporting permanently
+# unhealthy while serving traffic perfectly well.
+#
+# The check belongs where the service is named: compose declares one per service,
+# and Render uses its own `healthCheckPath` from render.yaml. Both are per-service
+# and neither needs this.
 
-# Overridden by compose for the merchant. uvicorn binds 0.0.0.0 inside a container
-# on purpose: the port is published deliberately or not at all.
-CMD ["sh", "-c", "exec uvicorn mandate.gateway.api:create_app --factory --host 0.0.0.0 --port ${PORT:-8000}"]
+# Which service this container is, chosen by MANDATE_SERVICE rather than by
+# overriding the command. An override means every platform that starts this image
+# has to tokenise an embedded `sh -c "..."` the same way, and the merchant was the
+# only service depending on that.
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
