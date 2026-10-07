@@ -49,6 +49,43 @@ from .sweep import sweep
 #: see the file rather than a string in a Python module.
 DASHBOARD = Path(__file__).parent / "static" / "dashboard.html"
 
+#: The bare URL returned 404, which on a hosted demo reads as "broken" rather than
+#: "this is an API". Small and inline rather than another file: it has no data in it
+#: and nothing to keep in sync.
+INDEX = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mandate</title><style>
+:root{color-scheme:dark;--bg:#0b0d10;--fg:#e6e9ef;--dim:#8b93a3;--accent:#7aa2f7;--deny:#f7768e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);padding:48px 16px;
+  font:15px/1.6 ui-sans-serif,system-ui,-apple-system,sans-serif}
+main{max-width:620px;margin:0 auto}
+h1{font-size:26px;margin:0 0 4px}
+p.lede{color:var(--dim);margin:0 0 28px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+ul{list-style:none;padding:0;margin:0 0 28px}
+li{padding:10px 0;border-top:1px solid #1b1f27}
+code{color:var(--dim);font-size:13px}
+.note{color:var(--dim);font-size:13px;border-left:2px solid var(--deny);padding-left:12px}
+</style></head><body><main>
+<h1>Mandate</h1>
+<p class="lede">A spend firewall for AI agents. The agent holds no PayPal credentials; it
+asks for money and gets a signed decision back. A deterministic engine decides &mdash; no
+model in the path &mdash; and approved intents become holds, not payments.</p>
+<ul>
+<li><a href="/v1/ops/dashboard">Decision ledger</a>
+  <br><code>every decision, its rule trace, and whether its signature still verifies</code></li>
+<li><a href="/docs">API reference</a>
+  <br><code>/v1/agent/* is what an agent may call. /v1/ops/* is what an operator may call.</code></li>
+<li><a href="/health">Health</a>
+  <br><code>which policy is loaded, and what is configured</code></li>
+<li><a href="https://github.com/pradeeptrain9/Mandate">Source</a>
+  <br><code>Apache-2.0</code></li>
+</ul>
+<p class="note">Hosted on a free instance: it sleeps after ~15 minutes idle, so the first
+request can take about a minute, and the ledger resets on each restart.</p>
+</main></body></html>"""
+
 agent_router = APIRouter(prefix="/v1/agent", tags=["agent"])
 webhook_router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
 ops_router = APIRouter(prefix="/v1/ops", tags=["operator"])
@@ -763,6 +800,17 @@ def create_app(gw: Gateway | None = None) -> FastAPI:
     app.include_router(webhook_router)
     app.include_router(buyer_router)
 
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def index() -> str:
+        """What this is, for anyone who pastes the bare URL.
+
+        Not a redirect to the dashboard. The gateway is an API with two
+        deliberately separated surfaces, and sending every visitor straight to the
+        operator view would hide that -- and would send a judge to the one page
+        that says nothing about why any of it exists.
+        """
+        return INDEX
+
     @app.get("/health", tags=["ops"])
     def health() -> dict:
         return {
@@ -770,8 +818,9 @@ def create_app(gw: Gateway | None = None) -> FastAPI:
             "policy": app.state.gateway.policy.policy_id,
             "paypal": "configured" if app.state.gateway.paypal else "absent",
             # Absent is a supported configuration, not a fault: the approval
-            # token and page work unchanged and the link is read off
-            # /v1/ops/holds. Reported because "did the approver get a text?" is
+            # token and page work unchanged and an operator mints the link with
+            # /v1/ops/holds/{id}/approval-link. Reported because "did the
+            # approver get a text?" is
             # otherwise answerable only by waiting for one not to arrive.
             "approver_sms": "configured" if app.state.gateway.approver.configured else "absent",
         }

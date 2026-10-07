@@ -701,3 +701,23 @@ def test_the_overview_says_whether_disputes_could_be_checked(client):
     assert body["disputes"]["reachable"] is False
     assert "not checked" in body["disputes"]["detail"]
     assert all(row["dispute"] is None for row in body["decisions"])
+
+
+def test_the_bare_url_explains_what_this_is(client):
+    """A 404 on the root of a hosted demo reads as "broken" to anyone who pastes
+    the URL, which on a submission is the first thing a judge does."""
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.text
+    # The two surfaces, and the claim the project actually makes.
+    assert "/v1/ops/dashboard" in body
+    assert "holds, not payments" in body
+    # No secrets, no data, nothing that needs keeping in sync with the ledger.
+    assert "decision_id" not in body
+
+
+def test_the_index_is_not_a_redirect_to_the_dashboard(client):
+    """Sending every visitor to the operator view would hide that the gateway is
+    an API with two deliberately separated surfaces."""
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 200
