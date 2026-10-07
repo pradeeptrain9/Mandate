@@ -66,6 +66,45 @@ a{color:var(--accent)}
     <div id="approvals"><div class="empty">Loading…</div></div>
   </div>
 
+  <h2>Money in flight</h2>
+  <div id="holdsMsg" class="msg"></div>
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+      <span class="muted">
+        Held means reserved at PayPal and not taken. Capture is the only
+        irreversible step on this page.
+      </span>
+      <input id="why" placeholder="why — recorded on the hold" style="max-width:280px">
+    </div>
+    <div id="holds"><div class="empty">Loading…</div></div>
+  </div>
+
+  <div class="panel">
+    <label>Settle everything at once</label>
+    <div class="muted" style="margin-bottom:10px">
+      Asks the delivery oracle about every held authorization, then captures what
+      arrived and releases what did not. Uncertainty releases rather than captures.
+    </div>
+    <div class="grid g3">
+      <div>
+        <label>Oracle</label>
+        <select id="oracle">
+          <option value="carrier">carrier — ask the merchant</option>
+          <option value="never">never delivers — for the non-delivery scene</option>
+          <option value="always">always delivers — for the happy-path scene</option>
+        </select>
+      </div>
+      <div>
+        <label>Release if it lapses within (hours)</label>
+        <input id="grace" type="number" min="0" max="696" value="24">
+      </div>
+      <div style="display:flex;align-items:end">
+        <button onclick="runSweep()">Run sweep</button>
+      </div>
+    </div>
+    <div id="sweepReport"></div>
+  </div>
+
   <h2>Spending rules</h2>
   <div id="policyMsg" class="msg"></div>
   <div class="panel">
@@ -192,6 +231,149 @@ async function verdict(id, what) {
   });
   if (!r.ok) { alert((await r.json()).detail || 'that did not work'); return; }
   loadApprovals();
+}
+
+// -- money in flight --------------------------------------------------------
+//
+// Which buttons a hold gets comes from the state machine in state.py rather than
+// from guessing. Offering Capture on something already captured would be a 409
+// the person has to read an error to learn about, and a disabled button that
+// explains itself is the whole point of having a page instead of curl.
+
+const SETTLE = {
+  awaiting_buyer: ['place'],
+  held:           ['capture', 'void'],
+  captured:       ['refund'],
+  failed:         ['void'],
+};
+
+const STATE_LABEL = {
+  received:'being checked', refused:'refused', awaiting_human:'waiting on a human',
+  declined_by_human:'declined', awaiting_buyer:'waiting on the buyer',
+  buyer_cancelled:'buyer cancelled', held:'money held', captured:'paid',
+  voided:'released', expired:'expired', refunded:'refunded', failed:'could not complete',
+};
+
+const ACTION = {
+  place:   { label:'Authorize',  cls:'',       confirm:null },
+  capture: { label:'Capture',    cls:'ok',     confirm:h =>
+    `Take ${h.amount} ${h.currency} from the buyer for ${h.merchant_name}?\n\n` +
+    `This is irreversible. The only way back is a refund.` },
+  void:    { label:'Release',    cls:'ghost',  confirm:h =>
+    `Release the ${h.amount} ${h.currency} held for ${h.merchant_name}?\n\n` +
+    `Nothing is taken. The merchant can ask again.` },
+  refund:  { label:'Refund',     cls:'danger', confirm:h =>
+    `Return ${h.captured || h.amount} ${h.currency} to the buyer?` },
+};
+
+function holdsMsg(kind, text) {
+  const box = document.getElementById('holdsMsg');
+  box.className = 'msg ' + kind;
+  box.textContent = text;
+}
+
+async function loadHolds() {
+  const r = await fetch('/v1/ops/holds').then(x => x.json());
+  // Newest first, and only the ones that reached PayPal: a refused decision has
+  // no money anywhere and belongs in the ledger, not on a settlement panel.
+  const rows = r.holds
+    .filter(h => h.paypal_order_id)
+    .sort((a, b) => b.requested_at.localeCompare(a.requested_at));
+  const box = document.getElementById('holds');
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty">Nothing has reached PayPal yet.</div>';
+    return;
+  }
+  box.innerHTML = rows.map(h => {
+    const actions = (SETTLE[h.state] || [])
+      .map(a => `<button class="${ACTION[a].cls}" onclick="settle('${h.decision_id}','${a}')">${
+        ACTION[a].label}</button>`).join('');
+    const expires = h.authorization_expires_at
+      ? `<span class="pill">lapses ${h.authorization_expires_at.slice(0,10)}</span>` : '';
+    return `
+    <div class="panel" style="margin:0 0 10px;background:#0d1117">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <strong class="amount">${esc(h.amount)} ${esc(h.currency)}</strong>
+          &nbsp;<span class="muted">at ${esc(h.merchant_name)}</span>
+          ${h.captured ? `<span class="muted"> &middot; ${esc(h.captured)} taken</span>` : ''}
+        </div>
+        <div class="row">
+          <span class="pill">${esc(STATE_LABEL[h.state] || h.state)}</span>${expires}
+        </div>
+      </div>
+      ${h.last_error ? `<div class="muted" style="margin-top:6px;color:var(--deny)">${
+        esc(h.last_error)}</div>` : ''}
+      <div class="row" style="margin-top:12px">
+        ${actions || '<span class="muted">Settled. Nothing left to do.</span>'}
+        <span class="muted">${esc(h.decision_id)}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function settle(id, what) {
+  const hold = (await fetch('/v1/ops/holds').then(x => x.json()))
+    .holds.find(h => h.decision_id === id);
+  if (!hold) { holdsMsg('err', 'That hold is gone. Reloading.'); return loadHolds(); }
+
+  const ask = ACTION[what].confirm;
+  if (ask && !confirm(ask(hold))) return;
+
+  const why = document.getElementById('why').value.trim();
+  const body = what === 'place' ? undefined : JSON.stringify(why ? { reason: why } : {});
+  const r = await fetch(`/v1/ops/holds/${id}/${what}`, {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body,
+  });
+  const out = await r.json();
+  if (!r.ok) { holdsMsg('err', out.detail || 'that did not work'); return loadHolds(); }
+  holdsMsg('good', `${ACTION[what].label}: ${id} is now ${
+    STATE_LABEL[out.hold.state] || out.hold.state}.`);
+  loadHolds();
+}
+
+async function runSweep() {
+  const oracle = document.getElementById('oracle').value;
+  const grace = parseFloat(document.getElementById('grace').value || '24');
+  // A sweep can capture, so it is confirmed like a capture. Naming the oracle in
+  // the question matters: "always" captures every held authorization at once.
+  if (!confirm(
+    `Settle every held authorization using the "${oracle}" oracle?\n\n` +
+    `Anything it reports as delivered will be captured, which is irreversible.`
+  )) return;
+
+  const report = document.getElementById('sweepReport');
+  report.innerHTML = '<div class="muted" style="margin-top:12px">Asking the oracle…</div>';
+  const r = await fetch('/v1/ops/sweep', {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({ oracle, grace_hours: grace }),
+  });
+  const out = await r.json();
+  if (!r.ok) {
+    report.innerHTML = `<div class="msg err" style="margin-top:12px">${
+      esc(out.detail || 'the sweep failed')}</div>`;
+    return;
+  }
+  const summary = Object.entries(out.summary || {})
+    .map(([k, v]) => `${esc(k)} ${v}`).join(' &middot; ') || 'nothing to do';
+  report.innerHTML = `
+    <div class="msg good" style="margin-top:12px">
+      Checked ${out.checked} via ${esc(out.oracle)}. ${summary}
+    </div>
+    ${out.actions.length ? `<table style="margin-top:4px">
+      <tr><th>Decision</th><th>Oracle said</th><th>Did</th><th>Now</th><th>Detail</th></tr>
+      ${out.actions.map(a => `<tr>
+        <td class="muted">${esc(a.decision_id)}</td>
+        <td>${esc(a.delivery)}</td>
+        <td>${esc(a.action)}</td>
+        <td>${esc(STATE_LABEL[a.state] || a.state)}</td>
+        <td class="muted">${esc(a.detail) || '—'}</td>
+      </tr>`).join('')}
+    </table>` : ''}`;
+  loadHolds();
 }
 
 // -- policy -----------------------------------------------------------------
@@ -360,7 +542,11 @@ async function loadHistory() {
 
 load();
 loadApprovals();
+loadHolds();
 setInterval(loadApprovals, 5000);
+// Slower than the approvals poll: a hold changes when a webhook lands or a person
+// presses something here, not continuously, and this list is longer to render.
+setInterval(loadHolds, 15000);
 </script>
 </body>
 </html>
